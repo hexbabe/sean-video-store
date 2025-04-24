@@ -14,6 +14,7 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	rutils "go.viam.com/rdk/utils"
+	"go.viam.com/rdk/utils/diskusage"
 	"go.viam.com/utils"
 )
 
@@ -63,6 +64,7 @@ type VideoStore interface {
 	Fetch(ctx context.Context, r *FetchRequest) (*FetchResponse, error)
 	Save(ctx context.Context, r *SaveRequest) (*SaveResponse, error)
 	Close()
+	GetStorageState() (*StorageState, error)
 }
 
 // CodecType repreasents a codec.
@@ -137,6 +139,25 @@ func (r *FetchRequest) Validate() error {
 		return errors.New("'from' timestamp is after 'to' timestamp")
 	}
 	return nil
+}
+
+// StorageState contains disk usage and stored video time ranges.
+type StorageState struct {
+	DiskUsage   DiskUsageState   `json:"disk_usage"`
+	StoredVideo []VideoTimeRange `json:"stored_video"`
+}
+
+// DiskUsageState represents disk usage information.
+type DiskUsageState struct {
+	StorageUsedGB            float64 `json:"storage_used_gb"`
+	StorageLimitGB           float64 `json:"storage_limit_gb"`
+	DeviceStorageRemainingGB float64 `json:"device_storage_remaining_gb"`
+}
+
+// VideoTimeRange represents a time range for stored video.
+type VideoTimeRange struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // NewFramePollingVideoStore returns a VideoStore that stores video it encoded from polling frames from a camera.Camera.
@@ -496,4 +517,80 @@ func (vs *videostore) Close() {
 			vs.logger.Errorf(err.Error())
 		}
 	}
+}
+
+// GetStorageState returns the current storage state for this VideoStore.
+func (vs *videostore) GetStorageState() (*StorageState, error) {
+	storagePath := vs.config.Storage.StoragePath
+	usedBytes, err := getDirectorySize(storagePath)
+	if err != nil {
+		return nil, err
+	}
+	usedGB := float64(usedBytes) / float64(gigabyte)
+	limitGB := float64(vs.config.Storage.SizeGB)
+
+	fsUsage, err := diskusage.Statfs(storagePath)
+	if err != nil {
+		return nil, err
+	}
+	remainingGB := float64(fsUsage.AvailableBytes) / float64(gigabyte)
+
+	files, err := getSortedFiles(storagePath)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		ranges                 []VideoTimeRange
+		currentFrom, currentTo time.Time
+		seenFirstSegment       bool
+	)
+
+	for _, file := range files {
+		info, err := getVideoInfo(file.name)
+		if err != nil {
+			vs.logger.Warnf("skipping unfinished or corrupt file %s: %v", file.name, err)
+			continue
+		}
+
+		start := file.startTime
+		end := start.Add(info.duration)
+
+		if !seenFirstSegment {
+			currentFrom, currentTo = start, end
+			seenFirstSegment = true
+			continue
+		}
+
+		if !start.After(currentTo) {
+			// overlaps or touches
+			if end.After(currentTo) {
+				currentTo = end
+			}
+		} else {
+			// there is a gap, so we flush the previous range
+			ranges = append(ranges, VideoTimeRange{
+				From: currentFrom.UTC().Format(TimeFormat) + "Z",
+				To:   currentTo.UTC().Format(TimeFormat) + "Z",
+			})
+			currentFrom, currentTo = start, end
+		}
+	}
+
+	if seenFirstSegment {
+		// append the final range
+		ranges = append(ranges, VideoTimeRange{
+			From: currentFrom.UTC().Format(TimeFormat) + "Z",
+			To:   currentTo.UTC().Format(TimeFormat) + "Z",
+		})
+	}
+
+	return &StorageState{
+		DiskUsage: DiskUsageState{
+			StorageUsedGB:            usedGB,
+			StorageLimitGB:           limitGB,
+			DeviceStorageRemainingGB: remainingGB,
+		},
+		StoredVideo: ranges,
+	}, nil
 }

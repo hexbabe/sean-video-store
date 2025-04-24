@@ -152,6 +152,29 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 			"command": "fetch",
 			"video":   videoBytesBase64,
 		}, nil
+	case "get-storage-state":
+		c.logger.Debug("get-storage-state command received")
+		state, err := c.videostore.GetStorageState()
+		if err != nil {
+			return nil, err
+		}
+		disk := map[string]interface{}{
+			"storage_used_gb":             state.DiskUsage.StorageUsedGB,
+			"storage_limit_gb":            state.DiskUsage.StorageLimitGB,
+			"device_storage_remaining_gb": state.DiskUsage.DeviceStorageRemainingGB,
+		}
+		videoList := make([]map[string]interface{}, 0, len(state.StoredVideo))
+		for _, r := range state.StoredVideo {
+			videoList = append(videoList, map[string]interface{}{
+				"from": r.From,
+				"to":   r.To,
+			})
+		}
+		return map[string]interface{}{
+			"command":      "get-storage-state",
+			"disk_usage":   disk,
+			"stored_video": videoList,
+		}, nil
 	default:
 		return nil, errors.New("invalid command")
 	}
