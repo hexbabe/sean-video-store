@@ -3,6 +3,7 @@ package videostore_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,4 +135,23 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 		test.That(t, err, test.ShouldBeNil)
 		test.That(t, fromTime.Before(toTime), test.ShouldBeTrue)
 	}
+
+	t.Run("Test Indexer ignores malformed files", func(t *testing.T) {
+		malformedPath := filepath.Join(storagePath, "malformed_file_name.mp4")
+		zeroSizePath := filepath.Join(storagePath, time.Now().Format(videostore.TimeFormat)+".mp4")
+		_ = os.WriteFile(malformedPath, []byte("not a video"), 0644)
+		_ = os.WriteFile(zeroSizePath, []byte{}, 0644)
+
+		// Wait for indexer to scan
+		time.Sleep(11 * time.Second)
+
+		res, err := vs.DoCommand(timeoutCtx, map[string]interface{}{"command": "get-storage-state"})
+		test.That(t, err, test.ShouldBeNil)
+		videoList, ok := res["stored_video"].([]interface{})
+		test.That(t, ok, test.ShouldBeTrue)
+		for _, item := range videoList {
+			entry := item.(map[string]interface{})
+			test.That(t, entry["from"].(string), test.ShouldNotContainSubstring, "malformed_file_name")
+		}
+	})
 }
