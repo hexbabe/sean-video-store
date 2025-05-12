@@ -11,6 +11,7 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/utils/diskusage"
 )
 
 func init() {
@@ -39,6 +40,7 @@ const (
 	retryInterval   = 1                // seconds
 	asyncTimeout    = 60               // seconds
 	tempPath        = "/tmp"
+	gigabyte        = 1024 * 1024 * 1024
 )
 
 type component struct {
@@ -158,16 +160,32 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 		if err != nil {
 			return nil, err
 		}
-		disk := map[string]interface{}{
-			"storage_used_gb":             state.DiskUsage.StorageUsedGB,
-			"storage_limit_gb":            state.DiskUsage.StorageLimitGB,
-			"device_storage_remaining_gb": state.DiskUsage.DeviceStorageRemainingGB,
+
+		vsConfig := c.videostore.GetConfig()
+		storagePath := vsConfig.Storage.StoragePath
+		storageLimitGB := vsConfig.Storage.SizeGB
+
+		fsUsage, err := diskusage.Statfs(storagePath)
+		var remainingGB float64
+		if err != nil {
+			c.logger.Warnw("failed to get filesystem stats for remaining space", "path", storagePath, "error", err)
+		} else {
+			remainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
 		}
-		videoList := make([]map[string]interface{}, 0, len(state.StoredVideo))
-		for _, r := range state.StoredVideo {
+
+		disk := map[string]interface{}{
+			"storage_used_gb":             float64(state.TotalSizeBytes) / float64(gigabyte),
+			"storage_limit_gb":            float64(storageLimitGB),
+			"device_storage_remaining_gb": remainingGB,
+		}
+
+		videoList := make([]map[string]interface{}, 0, len(state.Ranges))
+		for _, timeRange := range state.Ranges {
+			fromStr := timeRange.Start.UTC().Format(videostore.TimeFormat) + "Z"
+			toStr := timeRange.End.UTC().Format(videostore.TimeFormat) + "Z"
 			videoList = append(videoList, map[string]interface{}{
-				"from": r.From,
-				"to":   r.To,
+				"from": fromStr,
+				"to":   toStr,
 			})
 		}
 		return map[string]interface{}{

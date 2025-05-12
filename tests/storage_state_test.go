@@ -90,8 +90,8 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	vs, err := camera.FromRobot(r, videoStoreComponentName)
 	test.That(t, err, test.ShouldBeNil)
 
-	// Allow segmenter to write at least one file
-	time.Sleep(5 * time.Second)
+	// Allow segmenter to write at least one file and indexer to update
+	time.Sleep(10 * time.Second)
 
 	// Call get-storage-state
 	cmd := map[string]interface{}{"command": "get-storage-state"}
@@ -114,7 +114,7 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	// Validate stored_video ranges
 	videoList, ok := res["stored_video"].([]interface{})
 	test.That(t, ok, test.ShouldBeTrue)
-	test.That(t, len(videoList), test.ShouldBeGreaterThan, 0)
+	test.That(t, len(videoList), test.ShouldEqual, 8)
 	for _, item := range videoList {
 		entry, ok := item.(map[string]interface{})
 		test.That(t, ok, test.ShouldBeTrue)

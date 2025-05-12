@@ -12,6 +12,7 @@ require (
 	github.com/golangci/golangci-lint v1.61.0
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
+	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/rhysd/actionlint v1.6.24
 	go.viam.com/rdk v0.65.0
 	go.viam.com/test v1.2.4
