@@ -80,10 +80,10 @@ Additionally, make sure to add your configured data manager service to the `depe
   "type": "camera",
   "model": "viam:video:storage",
   "attributes": {
-    "camera": "wc-cam"
+    "camera": "wc-cam",
     "sync": "data-manager",
     "storage": {
-      "size_gb": 50,
+      "size_gb": 50
     }
   },
   "depends_on": [
