@@ -224,7 +224,10 @@ func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback() // rollback on failure
+         g := utils.NewGuard(tx.Rollback)
+	...
+	g.Success()
+	return tx.Commit()
 
 	query := fmt.Sprintf("DELETE FROM %s WHERE file_path = ?;", segmentsTableName)
 	stmt, err := tx.Prepare(query)
