@@ -139,8 +139,8 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	t.Run("Test Indexer ignores malformed files", func(t *testing.T) {
 		malformedPath := filepath.Join(storagePath, "malformed_file_name.mp4")
 		zeroSizePath := filepath.Join(storagePath, time.Now().Format(videostore.TimeFormat)+".mp4")
-		_ = os.WriteFile(malformedPath, []byte("not a video"), 0644)
-		_ = os.WriteFile(zeroSizePath, []byte{}, 0644)
+		_ = os.WriteFile(malformedPath, []byte("not a video"), 0o644)
+		_ = os.WriteFile(zeroSizePath, []byte{}, 0o644)
 
 		// Wait for indexer to scan
 		time.Sleep(11 * time.Second)

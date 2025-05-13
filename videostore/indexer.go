@@ -14,6 +14,7 @@ import (
 	// This registers the "sqlite3" driver with the database/sql package.
 	_ "github.com/mattn/go-sqlite3"
 	"go.viam.com/rdk/logging"
+	"go.viam.com/rdk/utils"
 )
 
 const (
@@ -141,7 +142,7 @@ func (ix *Indexer) scanAndIndex() error {
 // getIndexedFiles retrieves the set of file paths currently in the index.
 // Assumes ix.mu is held (or called from a context where the lock is held).
 func (ix *Indexer) getIndexedFiles() (map[string]struct{}, error) {
-	query := "SELECT file_path FROM " + segmentsTableName
+	query := "SELECT file_path FROM " + segmentsTableName + ";"
 	rows, err := ix.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -191,7 +192,7 @@ func (ix *Indexer) indexNewFile(filePath string, fileInfo os.FileInfo) error {
 		return nil
 	}
 
-	durationMs, err := ix.getVideoDuration(filePath)
+	durationMs, err := ix.getVideoDurationMs(filePath)
 	if err != nil {
 		ix.logger.Debugf("failed to get video info, unreadable file will not be indexed: %w", err)
 		return nil
@@ -224,10 +225,13 @@ func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-         g := utils.NewGuard(tx.Rollback)
-	...
-	g.Success()
-	return tx.Commit()
+	g := utils.NewGuard(func() {
+		err := tx.Rollback()
+		if err != nil {
+			ix.logger.Errorw("failed to rollback transaction", "error", err)
+		}
+	})
+	defer g.Success()
 
 	query := fmt.Sprintf("DELETE FROM %s WHERE file_path = ?;", segmentsTableName)
 	stmt, err := tx.Prepare(query)
@@ -246,9 +250,9 @@ func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
 	return tx.Commit()
 }
 
-// getVideoDuration uses the getVideoInfo utility to get the duration of a video file.
+// getVideoDurationMs uses the getVideoInfo utility to get the duration of a video file.
 // This function does not require the indexer mutex.
-func (ix *Indexer) getVideoDuration(filePath string) (int64, error) {
+func (ix *Indexer) getVideoDurationMs(filePath string) (int64, error) {
 	info, err := getVideoInfo(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("getVideoInfo failed for %s: %w", filePath, err)
