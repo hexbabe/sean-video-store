@@ -57,7 +57,7 @@ type videostore struct {
 
 	rawSegmenter *RawSegmenter
 	concater     *concater
-	indexer      *Indexer
+	indexer      *indexer
 }
 
 // VideoStore stores video and provides APIs to request the stored video.
@@ -206,13 +206,13 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 		return nil, err
 	}
 
-	vs.indexer = NewIndexer(config.Storage.StoragePath, logger)
-	err = vs.indexer.Setup()
+	vs.indexer = newIndexer(config.Storage.StoragePath, logger)
+	err = vs.indexer.setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
 
-	vs.workers.Add(func(ctx context.Context) { vs.indexer.Run(ctx) })
+	vs.workers.Add(func(ctx context.Context) { vs.indexer.run(ctx) })
 	vs.workers.Add(func(ctx context.Context) {
 		vs.fetchFrames(
 			ctx,
@@ -254,8 +254,8 @@ func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, er
 		return nil, err
 	}
 
-	indexer := NewIndexer(config.Storage.StoragePath, logger)
-	err = indexer.Setup()
+	indexer := newIndexer(config.Storage.StoragePath, logger)
+	err = indexer.setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer for read-only videostore: %w", err)
 	}
@@ -303,8 +303,8 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 		return nil, err
 	}
 
-	indexer := NewIndexer(config.Storage.StoragePath, logger)
-	err = indexer.Setup()
+	indexer := newIndexer(config.Storage.StoragePath, logger)
+	err = indexer.setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
@@ -319,7 +319,7 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 		workers:      utils.NewBackgroundStoppableWorkers(),
 	}
 
-	vs.workers.Add(func(ctx context.Context) { vs.indexer.Run(ctx) })
+	vs.workers.Add(func(ctx context.Context) { vs.indexer.run(ctx) })
 	vs.workers.Add(vs.deleter)
 	return vs, nil
 }
@@ -482,7 +482,7 @@ func (vs *videostore) cleanupStorage() error {
 	var bytesDeleted int64
 	var deletedFilePaths []string // accumulate paths successfully deleted from disk to be removed from index
 
-	allSegments, err := vs.indexer.GetSegmentsAscTime()
+	allSegments, err := vs.indexer.getSegmentsAscTime()
 	if err != nil {
 		return fmt.Errorf("failed to get segments from indexer: %w", err)
 	}
@@ -520,7 +520,7 @@ func (vs *videostore) cleanupStorage() error {
 
 	if len(deletedFilePaths) > 0 {
 		vs.logger.Debugf("removing %d segments from index immediately after disk deletion attempts", len(deletedFilePaths))
-		if removeErr := vs.indexer.RemoveIndexedFiles(deletedFilePaths); removeErr != nil {
+		if removeErr := vs.indexer.removeIndexedFiles(deletedFilePaths); removeErr != nil {
 			return fmt.Errorf("failed to update index after deleting/checking files: %w", removeErr)
 		}
 	}
@@ -569,7 +569,7 @@ func (vs *videostore) Close() {
 	}
 
 	if vs.indexer != nil {
-		if err := vs.indexer.Close(); err != nil {
+		if err := vs.indexer.close(); err != nil {
 			vs.logger.Errorw("error closing indexer", "error", err)
 			errs = append(errs, fmt.Errorf("indexer close: %w", err))
 		}
@@ -601,7 +601,7 @@ func (vs *videostore) GetStorageState() (*StorageState, error) {
 		return nil, errors.New("indexer not initialized")
 	}
 
-	videoRanges, err := vs.indexer.GetVideoList()
+	videoRanges, err := vs.indexer.getVideoList()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage state from indexer: %w", err)
 	}

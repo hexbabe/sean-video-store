@@ -24,8 +24,8 @@ const (
 	dbFileMode        = 0o750
 )
 
-// Indexer manages metadata for video segments stored on disk.
-type Indexer struct {
+// indexer manages metadata for video segments stored on disk.
+type indexer struct {
 	logger      logging.Logger
 	storagePath string
 	dbPath      string
@@ -33,24 +33,23 @@ type Indexer struct {
 	setupDone   bool
 }
 
-// SegmentMetadata holds metadata for an indexed segment.
-type SegmentMetadata struct {
+// segmentMetadata holds metadata for an indexed segment.
+type segmentMetadata struct {
 	FilePath  string
 	SizeBytes int64
 }
 
-// NewIndexer creates a new Indexer instance.
-func NewIndexer(storagePath string, logger logging.Logger) *Indexer {
+// newIndexer creates a new indexer instance.
+func newIndexer(storagePath string, logger logging.Logger) *indexer {
 	dbPath := filepath.Join(storagePath, dbFileName)
-	return &Indexer{
+	return &indexer{
 		logger:      logger,
 		storagePath: storagePath,
 		dbPath:      dbPath,
 	}
 }
 
-// Setup performs IO and DB initialization. Must be called before use.
-func (ix *Indexer) Setup() error {
+func (ix *indexer) setup() error {
 	if ix.setupDone {
 		return nil
 	}
@@ -71,8 +70,7 @@ func (ix *Indexer) Setup() error {
 	return nil
 }
 
-// initializeDB creates the necessary table if it doesn't exist.
-func (ix *Indexer) initializeDB() error {
+func (ix *indexer) initializeDB() error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		file_path TEXT PRIMARY KEY,
@@ -88,8 +86,7 @@ func (ix *Indexer) initializeDB() error {
 	return err
 }
 
-// Run starts the background polling loop for the indexer.
-func (ix *Indexer) Run(ctx context.Context) {
+func (ix *indexer) run(ctx context.Context) {
 	ix.logger.Debug("starting Indexer polling loop")
 	ticker := time.NewTicker(pollingInterval)
 	defer ticker.Stop()
@@ -107,10 +104,7 @@ func (ix *Indexer) Run(ctx context.Context) {
 	}
 }
 
-// scanAndIndex performs one cycle of scanning the storage directory and updating the index.
-// It focuses on adding new files found on disk to the index.
-// It does not remove index entries for deleted disk files; that is handled by the cleanup/deletion logic.
-func (ix *Indexer) scanAndIndex() error {
+func (ix *indexer) scanAndIndex() error {
 	if !ix.setupDone {
 		return errors.New("indexer setup not complete")
 	}
@@ -140,8 +134,7 @@ func (ix *Indexer) scanAndIndex() error {
 	return nil
 }
 
-// getIndexedFiles retrieves the set of file paths currently in the index.
-func (ix *Indexer) getIndexedFiles() (map[string]struct{}, error) {
+func (ix *indexer) getIndexedFiles() (map[string]struct{}, error) {
 	if !ix.setupDone {
 		return nil, errors.New("indexer setup not complete")
 	}
@@ -163,9 +156,7 @@ func (ix *Indexer) getIndexedFiles() (map[string]struct{}, error) {
 	return files, rows.Err()
 }
 
-// getDiskFiles retrieves the set of .mp4 files currently in the storage directory.
-// It interacts with the filesystem only and does not require the indexer mutex.
-func (ix *Indexer) getDiskFiles() (map[string]os.FileInfo, error) {
+func (ix *indexer) getDiskFiles() (map[string]os.FileInfo, error) {
 	files := make(map[string]os.FileInfo)
 	entries, err := os.ReadDir(ix.storagePath)
 	if err != nil {
@@ -186,8 +177,7 @@ func (ix *Indexer) getDiskFiles() (map[string]os.FileInfo, error) {
 	return files, nil
 }
 
-// indexNewFile extracts metadata and adds a new file to the index.
-func (ix *Indexer) indexNewFile(filePath string, fileInfo os.FileInfo) error {
+func (ix *indexer) indexNewFile(filePath string, fileInfo os.FileInfo) error {
 	startTime, err := extractDateTimeFromFilename(filePath)
 	if err != nil {
 		ix.logger.Warnw("failed to extract timestamp from filename, skipping", "file", filePath, "error", err)
@@ -213,8 +203,7 @@ func (ix *Indexer) indexNewFile(filePath string, fileInfo os.FileInfo) error {
 	return nil
 }
 
-// RemoveIndexedFiles removes file paths from the index.
-func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
+func (ix *indexer) removeIndexedFiles(filePaths []string) error {
 	if !ix.setupDone {
 		return errors.New("indexer setup not complete")
 	}
@@ -251,9 +240,7 @@ func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
 	return tx.Commit()
 }
 
-// getVideoDurationMs uses the getVideoInfo utility to get the duration of a video file.
-// This function does not require the indexer mutex.
-func (ix *Indexer) getVideoDurationMs(filePath string) (int64, error) {
+func (ix *indexer) getVideoDurationMs(filePath string) (int64, error) {
 	info, err := getVideoInfo(filePath)
 	if err != nil {
 		return 0, fmt.Errorf("getVideoInfo failed for %s: %w", filePath, err)
@@ -263,7 +250,7 @@ func (ix *Indexer) getVideoDurationMs(filePath string) (int64, error) {
 	return durationMs, nil
 }
 
-// videoRange represents a single contiguous block of stored video.
+// videoRange represents a single contiguous block of stored video segments.
 type videoRange struct {
 	Start time.Time
 	End   time.Time
@@ -277,8 +264,7 @@ type VideoRanges struct {
 	Ranges          []videoRange // List of contiguous time ranges
 }
 
-// GetVideoList calculates the current video segment state from the index.
-func (ix *Indexer) GetVideoList() (VideoRanges, error) {
+func (ix *indexer) getVideoList() (VideoRanges, error) {
 	if !ix.setupDone {
 		return VideoRanges{}, errors.New("indexer setup not complete")
 	}
@@ -347,9 +333,7 @@ func (ix *Indexer) GetVideoList() (VideoRanges, error) {
 	return state, nil
 }
 
-// GetSegmentsAscTime retrieves all indexed segments in ascending order by start time.
-// Returns a slice of SegmentMetadata containing file path and size.
-func (ix *Indexer) GetSegmentsAscTime() ([]SegmentMetadata, error) {
+func (ix *indexer) getSegmentsAscTime() ([]segmentMetadata, error) {
 	if !ix.setupDone {
 		return nil, errors.New("indexer setup not complete")
 	}
@@ -365,7 +349,7 @@ func (ix *Indexer) GetSegmentsAscTime() ([]SegmentMetadata, error) {
 	}
 	defer rows.Close()
 
-	var segments []SegmentMetadata
+	var segments []segmentMetadata
 
 	for rows.Next() {
 		var filePath string
@@ -377,7 +361,7 @@ func (ix *Indexer) GetSegmentsAscTime() ([]SegmentMetadata, error) {
 		}
 
 		if sizeBytes.Valid {
-			segments = append(segments, SegmentMetadata{
+			segments = append(segments, segmentMetadata{
 				FilePath:  filePath,
 				SizeBytes: sizeBytes.Int64,
 			})
@@ -394,8 +378,7 @@ func (ix *Indexer) GetSegmentsAscTime() ([]SegmentMetadata, error) {
 	return segments, nil
 }
 
-// Close shuts down the indexer and closes the database connection.
-func (ix *Indexer) Close() error {
+func (ix *indexer) close() error {
 	if ix.db != nil {
 		err := ix.db.Close()
 		if err != nil {
