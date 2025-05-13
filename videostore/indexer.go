@@ -379,14 +379,14 @@ func (ix *indexer) getSegmentsAscTime() ([]segmentMetadata, error) {
 }
 
 func (ix *indexer) close() error {
-	if ix.db != nil {
+	if ix.setupDone {
 		err := ix.db.Close()
 		if err != nil {
-			ix.logger.Errorw("error closing index db", "error", err)
+			return fmt.Errorf("error closing index db: %w", err)
 		}
 		ix.db = nil
+		ix.setupDone = false
 		ix.logger.Debug("indexer closed")
 	}
-	ix.setupDone = false
 	return nil
 }
