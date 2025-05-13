@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	// Blank importing SQLite3 driver for its side-effects.
@@ -30,7 +29,6 @@ type Indexer struct {
 	storagePath string
 	dbPath      string
 	db          *sql.DB
-	mu          sync.Mutex
 }
 
 // SegmentMetadata holds metadata for an indexed segment.
@@ -71,9 +69,6 @@ func NewIndexer(storagePath string, logger logging.Logger) (*Indexer, error) {
 
 // initializeDB creates the necessary table if it doesn't exist.
 func (ix *Indexer) initializeDB() error {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		file_path TEXT PRIMARY KEY,
@@ -118,8 +113,6 @@ func (ix *Indexer) scanAndIndex() error {
 		return nil
 	}
 
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
 	// Get indexed files
 	indexedFiles, err := ix.getIndexedFiles()
 	if err != nil {
@@ -140,7 +133,6 @@ func (ix *Indexer) scanAndIndex() error {
 }
 
 // getIndexedFiles retrieves the set of file paths currently in the index.
-// Assumes ix.mu is held (or called from a context where the lock is held).
 func (ix *Indexer) getIndexedFiles() (map[string]struct{}, error) {
 	query := "SELECT file_path FROM " + segmentsTableName + ";"
 	rows, err := ix.db.Query(query)
@@ -184,7 +176,6 @@ func (ix *Indexer) getDiskFiles() (map[string]os.FileInfo, error) {
 }
 
 // indexNewFile extracts metadata and adds a new file to the index.
-// Assumes ix.mu is held.
 func (ix *Indexer) indexNewFile(filePath string, fileInfo os.FileInfo) error {
 	startTime, err := extractDateTimeFromFilename(filePath)
 	if err != nil {
@@ -212,11 +203,7 @@ func (ix *Indexer) indexNewFile(filePath string, fileInfo os.FileInfo) error {
 }
 
 // RemoveIndexedFiles removes file paths from the index.
-// This function acquires the indexer's mutex.
 func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-
 	if len(filePaths) == 0 {
 		return nil
 	}
@@ -277,11 +264,7 @@ type StorageState struct {
 }
 
 // GetStorageState calculates the current storage state from the index.
-// This function acquires the indexer's mutex.
 func (ix *Indexer) GetStorageState() (StorageState, error) {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-
 	var state StorageState
 
 	// Query all segments, ordered by start time
@@ -349,11 +332,7 @@ func (ix *Indexer) GetStorageState() (StorageState, error) {
 
 // GetSegmentsAscTime retrieves all indexed segments in ascending order by start time.
 // Returns a slice of SegmentMetadata containing file path and size.
-// This function acquires the indexer's mutex.
 func (ix *Indexer) GetSegmentsAscTime() ([]SegmentMetadata, error) {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-
 	query := fmt.Sprintf(`
 	SELECT file_path, size_bytes
 	FROM %s
@@ -396,11 +375,7 @@ func (ix *Indexer) GetSegmentsAscTime() ([]SegmentMetadata, error) {
 }
 
 // Close shuts down the indexer and closes the database connection.
-// This function acquires the indexer's mutex.
 func (ix *Indexer) Close() error {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-
 	if ix.db != nil {
 		err := ix.db.Close()
 		if err != nil {

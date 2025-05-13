@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 
 	"github.com/viam-modules/video-store/videostore"
 	"go.viam.com/rdk/components/camera"
@@ -168,10 +169,9 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 		fsUsage, err := diskusage.Statfs(storagePath)
 		var remainingGB float64
 		if err != nil {
-			c.logger.Warnw("failed to get filesystem stats for remaining space", "path", storagePath, "error", err)
-		} else {
-			remainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
+			return nil, fmt.Errorf("failed to get filesystem stats for remaining space: %w", err)
 		}
+		remainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
 
 		disk := map[string]interface{}{
 			"storage_used_gb":             float64(state.TotalSizeBytes) / float64(gigabyte),
