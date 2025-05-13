@@ -5,14 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 
 	"github.com/viam-modules/video-store/videostore"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/utils/diskusage"
 )
 
 func init() {
@@ -162,21 +160,11 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 			return nil, err
 		}
 
-		vsConfig := c.videostore.GetConfig()
-		storagePath := vsConfig.Storage.StoragePath
-		storageLimitGB := vsConfig.Storage.SizeGB
-
-		fsUsage, err := diskusage.Statfs(storagePath)
-		var remainingGB float64
-		if err != nil {
-			return nil, fmt.Errorf("failed to get filesystem stats for remaining space: %w", err)
-		}
-		remainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
-
 		disk := map[string]interface{}{
 			"storage_used_gb":             float64(state.TotalSizeBytes) / float64(gigabyte),
-			"storage_limit_gb":            float64(storageLimitGB),
-			"device_storage_remaining_gb": remainingGB,
+			"storage_limit_gb":            float64(state.StorageLimitGB),
+			"device_storage_remaining_gb": state.DeviceStorageRemainingGB,
+			"storage_path":                state.StoragePath,
 		}
 
 		videoList := make([]map[string]interface{}, 0, len(state.Ranges))
@@ -188,6 +176,7 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 				"to":   toStr,
 			})
 		}
+
 		return map[string]interface{}{
 			"command":      "get-storage-state",
 			"disk_usage":   disk,

@@ -14,6 +14,7 @@ import (
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	rutils "go.viam.com/rdk/utils"
+	"go.viam.com/rdk/utils/diskusage"
 	"go.viam.com/utils"
 )
 
@@ -65,7 +66,6 @@ type VideoStore interface {
 	Save(ctx context.Context, r *SaveRequest) (*SaveResponse, error)
 	Close()
 	GetStorageState() (*StorageState, error)
-	GetConfig() Config
 }
 
 // CodecType repreasents a codec.
@@ -149,10 +149,12 @@ type DiskUsageState struct {
 	DeviceStorageRemainingGB float64 `json:"device_storage_remaining_gb"`
 }
 
-// VideoTimeRange represents a time range for stored video.
-type VideoTimeRange struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+// StorageState summarizes the state of the stored video segments and storage config info.
+type StorageState struct {
+	VideoRanges
+	StorageLimitGB           int
+	DeviceStorageRemainingGB float64
+	StoragePath              string
 }
 
 // NewFramePollingVideoStore returns a VideoStore that stores video it encoded from polling frames from a camera.Camera.
@@ -599,15 +601,23 @@ func (vs *videostore) GetStorageState() (*StorageState, error) {
 		return nil, errors.New("indexer not initialized")
 	}
 
-	indexerState, err := vs.indexer.GetStorageState()
+	videoRanges, err := vs.indexer.GetVideoList()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage state from indexer: %w", err)
 	}
 
-	return &indexerState, nil
-}
+	storageState := StorageState{
+		VideoRanges: videoRanges,
+	}
+	storageState.StorageLimitGB = vs.config.Storage.SizeGB
+	storageState.StoragePath = vs.config.Storage.StoragePath
 
-// GetConfig returns the configuration for the VideoStore.
-func (vs *videostore) GetConfig() Config {
-	return vs.config
+	fsUsage, err := diskusage.Statfs(vs.config.Storage.StoragePath)
+	if err == nil {
+		storageState.DeviceStorageRemainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
+	} else {
+		storageState.DeviceStorageRemainingGB = 0
+	}
+
+	return &storageState, nil
 }

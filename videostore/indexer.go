@@ -263,26 +263,26 @@ func (ix *Indexer) getVideoDurationMs(filePath string) (int64, error) {
 	return durationMs, nil
 }
 
-// timeRange represents a single contiguous block of stored video.
-type timeRange struct {
+// videoRange represents a single contiguous block of stored video.
+type videoRange struct {
 	Start time.Time
 	End   time.Time
 }
 
-// StorageState summarizes the state of the stored video segments.
-type StorageState struct {
+// VideoRanges summarizes the state of the stored video segments.
+type VideoRanges struct {
 	TotalSizeBytes  int64
 	TotalDurationMs int64
 	SegmentCount    int
-	Ranges          []timeRange // List of contiguous time ranges
+	Ranges          []videoRange // List of contiguous time ranges
 }
 
-// GetStorageState calculates the current storage state from the index.
-func (ix *Indexer) GetStorageState() (StorageState, error) {
+// GetVideoList calculates the current video segment state from the index.
+func (ix *Indexer) GetVideoList() (VideoRanges, error) {
 	if !ix.setupDone {
-		return StorageState{}, errors.New("indexer setup not complete")
+		return VideoRanges{}, errors.New("indexer setup not complete")
 	}
-	var state StorageState
+	var state VideoRanges
 
 	// Query all segments, ordered by start time
 	query := fmt.Sprintf(`
@@ -293,12 +293,12 @@ func (ix *Indexer) GetStorageState() (StorageState, error) {
 
 	rows, err := ix.db.Query(query)
 	if err != nil {
-		return StorageState{}, fmt.Errorf("failed to query segments for state: %w", err)
+		return VideoRanges{}, fmt.Errorf("failed to query segments for state: %w", err)
 	}
 	defer rows.Close()
 
-	var ranges []timeRange
-	var currentRange *timeRange
+	var ranges []videoRange
+	var currentRange *videoRange
 	const slopDuration = 5 * time.Second
 
 	for rows.Next() {
@@ -307,7 +307,7 @@ func (ix *Indexer) GetStorageState() (StorageState, error) {
 		var sizeBytes sql.NullInt64
 
 		if err := rows.Scan(&startTimeUnix, &durationMs, &sizeBytes); err != nil {
-			return StorageState{}, fmt.Errorf("failed to scan segment row: %w", err)
+			return VideoRanges{}, fmt.Errorf("failed to scan segment row: %w", err)
 		}
 
 		state.SegmentCount++
@@ -325,11 +325,11 @@ func (ix *Indexer) GetStorageState() (StorageState, error) {
 		segmentEnd := segmentStart.Add(time.Duration(durationMs.Int64) * time.Millisecond)
 
 		if currentRange == nil {
-			currentRange = &timeRange{Start: segmentStart, End: segmentEnd}
+			currentRange = &videoRange{Start: segmentStart, End: segmentEnd}
 		} else {
 			if segmentStart.After(currentRange.End.Add(slopDuration)) {
 				ranges = append(ranges, *currentRange)
-				currentRange = &timeRange{Start: segmentStart, End: segmentEnd}
+				currentRange = &videoRange{Start: segmentStart, End: segmentEnd}
 			} else {
 				currentRange.End = segmentEnd
 			}
@@ -340,7 +340,7 @@ func (ix *Indexer) GetStorageState() (StorageState, error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		return StorageState{}, fmt.Errorf("error iterating over all segments query result: %w", err)
+		return VideoRanges{}, fmt.Errorf("error iterating over all segments query result: %w", err)
 	}
 
 	state.Ranges = ranges
