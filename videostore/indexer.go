@@ -3,6 +3,7 @@ package videostore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ type Indexer struct {
 	storagePath string
 	dbPath      string
 	db          *sql.DB
+	setupDone   bool
 }
 
 // SegmentMetadata holds metadata for an indexed segment.
@@ -38,33 +40,35 @@ type SegmentMetadata struct {
 }
 
 // NewIndexer creates a new Indexer instance.
-func NewIndexer(storagePath string, logger logging.Logger) (*Indexer, error) {
+func NewIndexer(storagePath string, logger logging.Logger) *Indexer {
 	dbPath := filepath.Join(storagePath, dbFileName)
-	if err := os.MkdirAll(filepath.Dir(dbPath), dbFileMode); err != nil {
-		return nil, fmt.Errorf("failed to create directory for index db: %w", err)
-	}
-
-	db, err := sql.Open("sqlite3", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open index db: %w", err)
-	}
-
-	ix := &Indexer{
+	return &Indexer{
 		logger:      logger,
 		storagePath: storagePath,
 		dbPath:      dbPath,
-		db:          db,
 	}
+}
 
+// Setup performs IO and DB initialization. Must be called before use.
+func (ix *Indexer) Setup() error {
+	if ix.setupDone {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(ix.dbPath), dbFileMode); err != nil {
+		return fmt.Errorf("failed to create directory for index db: %w", err)
+	}
+	db, err := sql.Open("sqlite3", ix.dbPath)
+	if err != nil {
+		return fmt.Errorf("failed to open index db: %w", err)
+	}
+	ix.db = db
 	if err := ix.initializeDB(); err != nil {
-		err := ix.Close() // close out db if initialization fails
-		if err != nil {
-			logger.Errorw("error closing indexer", "error", err)
-		}
-		return nil, fmt.Errorf("failed to initialize index db schema: %w", err)
+		_ = ix.db.Close()
+		ix.db = nil
+		return fmt.Errorf("failed to initialize index db schema: %w", err)
 	}
-
-	return ix, nil
+	ix.setupDone = true
+	return nil
 }
 
 // initializeDB creates the necessary table if it doesn't exist.
@@ -85,7 +89,11 @@ func (ix *Indexer) initializeDB() error {
 }
 
 // Run starts the background polling loop for the indexer.
-func (ix *Indexer) Run(ctx context.Context) {
+func (ix *Indexer) Run(ctx context.Context) error {
+	if !ix.setupDone {
+		return errors.New("indexer setup not complete")
+
+	}
 	ix.logger.Debug("starting Indexer polling loop")
 	ticker := time.NewTicker(pollingInterval)
 	defer ticker.Stop()
@@ -93,7 +101,8 @@ func (ix *Indexer) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			ix.logger.Debug("indexer polling loop has stopped")
+			return nil
 		case <-ticker.C:
 			if err := ix.scanAndIndex(); err != nil {
 				ix.logger.Errorw("error during indexer scan", "error", err)
@@ -106,6 +115,9 @@ func (ix *Indexer) Run(ctx context.Context) {
 // It focuses on adding new files found on disk to the index.
 // It does not remove index entries for deleted disk files; that is handled by the cleanup/deletion logic.
 func (ix *Indexer) scanAndIndex() error {
+	if !ix.setupDone {
+		return errors.New("indexer setup not complete")
+	}
 	// Get disk files
 	diskFiles, err := ix.getDiskFiles()
 	if err != nil {
@@ -134,6 +146,9 @@ func (ix *Indexer) scanAndIndex() error {
 
 // getIndexedFiles retrieves the set of file paths currently in the index.
 func (ix *Indexer) getIndexedFiles() (map[string]struct{}, error) {
+	if !ix.setupDone {
+		return nil, errors.New("indexer setup not complete")
+	}
 	query := "SELECT file_path FROM " + segmentsTableName + ";"
 	rows, err := ix.db.Query(query)
 	if err != nil {
@@ -204,6 +219,9 @@ func (ix *Indexer) indexNewFile(filePath string, fileInfo os.FileInfo) error {
 
 // RemoveIndexedFiles removes file paths from the index.
 func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
+	if !ix.setupDone {
+		return errors.New("indexer setup not complete")
+	}
 	if len(filePaths) == 0 {
 		return nil
 	}
@@ -265,6 +283,9 @@ type StorageState struct {
 
 // GetStorageState calculates the current storage state from the index.
 func (ix *Indexer) GetStorageState() (StorageState, error) {
+	if !ix.setupDone {
+		return StorageState{}, errors.New("indexer setup not complete")
+	}
 	var state StorageState
 
 	// Query all segments, ordered by start time
@@ -333,6 +354,9 @@ func (ix *Indexer) GetStorageState() (StorageState, error) {
 // GetSegmentsAscTime retrieves all indexed segments in ascending order by start time.
 // Returns a slice of SegmentMetadata containing file path and size.
 func (ix *Indexer) GetSegmentsAscTime() ([]SegmentMetadata, error) {
+	if !ix.setupDone {
+		return nil, errors.New("indexer setup not complete")
+	}
 	query := fmt.Sprintf(`
 	SELECT file_path, size_bytes
 	FROM %s
@@ -384,5 +408,6 @@ func (ix *Indexer) Close() error {
 		ix.db = nil
 		ix.logger.Debug("indexer closed")
 	}
+	ix.setupDone = false
 	return nil
 }

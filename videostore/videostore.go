@@ -204,9 +204,10 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 		return nil, err
 	}
 
-	vs.indexer, err = NewIndexer(config.Storage.StoragePath, logger)
+	vs.indexer = NewIndexer(config.Storage.StoragePath, logger)
+	err = vs.indexer.Setup()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create indexer: %w", err)
+		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
 
 	vs.workers.Add(func(ctx context.Context) { vs.indexer.Run(ctx) })
@@ -251,9 +252,10 @@ func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, er
 		return nil, err
 	}
 
-	indexer, err := NewIndexer(config.Storage.StoragePath, logger)
+	indexer := NewIndexer(config.Storage.StoragePath, logger)
+	err = indexer.Setup()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create indexer for read-only videostore: %w", err)
+		return nil, fmt.Errorf("failed to set up indexer for read-only videostore: %w", err)
 	}
 
 	return &videostore{
@@ -299,9 +301,10 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 		return nil, err
 	}
 
-	indexer, err := NewIndexer(config.Storage.StoragePath, logger)
+	indexer := NewIndexer(config.Storage.StoragePath, logger)
+	err = indexer.Setup()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create indexer: %w", err)
+		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
 
 	vs := &videostore{
