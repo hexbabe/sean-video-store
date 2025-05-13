@@ -89,11 +89,7 @@ func (ix *Indexer) initializeDB() error {
 }
 
 // Run starts the background polling loop for the indexer.
-func (ix *Indexer) Run(ctx context.Context) error {
-	if !ix.setupDone {
-		return errors.New("indexer setup not complete")
-
-	}
+func (ix *Indexer) Run(ctx context.Context) {
 	ix.logger.Debug("starting Indexer polling loop")
 	ticker := time.NewTicker(pollingInterval)
 	defer ticker.Stop()
@@ -102,7 +98,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			ix.logger.Debug("indexer polling loop has stopped")
-			return nil
+			return
 		case <-ticker.C:
 			if err := ix.scanAndIndex(); err != nil {
 				ix.logger.Errorw("error during indexer scan", "error", err)

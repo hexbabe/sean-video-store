@@ -91,8 +91,28 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	vs, err := camera.FromRobot(r, videoStoreComponentName)
 	test.That(t, err, test.ShouldBeNil)
 
-	// Allow segmenter to write at least one file and indexer to update
-	time.Sleep(10 * time.Second)
+	// Wait for the indexer to index at least one segment
+	timeout := time.After(10 * time.Second)
+	tick := time.Tick(100 * time.Millisecond)
+	indexed := false
+	for !indexed {
+		select {
+		case <-timeout:
+			t.Fatal("timed out waiting for indexer to index at least one segment")
+		case <-tick:
+			cmd := map[string]interface{}{"command": "get-storage-state"}
+			res, err := vs.DoCommand(timeoutCtx, cmd)
+			t.Logf("get-storage-state error: %+v", err)
+			if err != nil {
+				continue
+			}
+			t.Logf("get-storage-state result: %+v", res)
+			videoList, ok := res["stored_video"].([]interface{})
+			if ok && len(videoList) > 0 {
+				indexed = true
+			}
+		}
+	}
 
 	// Call get-storage-state
 	cmd := map[string]interface{}{"command": "get-storage-state"}
