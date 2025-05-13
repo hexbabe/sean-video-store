@@ -613,11 +613,10 @@ func (vs *videostore) GetStorageState() (*StorageState, error) {
 	storageState.StoragePath = vs.config.Storage.StoragePath
 
 	fsUsage, err := diskusage.Statfs(vs.config.Storage.StoragePath)
-	if err == nil {
-		storageState.DeviceStorageRemainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
-	} else {
-		storageState.DeviceStorageRemainingGB = 0
+	if err != nil {
+		return nil, fmt.Errorf("failed to get filesystem stats for remaining space: %w", err)
 	}
+	storageState.DeviceStorageRemainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
 
 	return &storageState, nil
 }
