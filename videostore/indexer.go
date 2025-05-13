@@ -226,7 +226,7 @@ func (ix *Indexer) RemoveIndexedFiles(filePaths []string) error {
 	}
 	defer tx.Rollback() // rollback on failure
 
-	query := fmt.Sprintf("DELETE FROM %s WHERE file_path = ?", segmentsTableName)
+	query := fmt.Sprintf("DELETE FROM %s WHERE file_path = ?;", segmentsTableName)
 	stmt, err := tx.Prepare(query)
 	if err != nil {
 		return fmt.Errorf("failed to prepare delete statement: %w", err)
