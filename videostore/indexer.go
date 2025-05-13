@@ -22,6 +22,7 @@ const (
 	pollingInterval   = 5 * time.Second
 	segmentsTableName = "segments"
 	dbFileMode        = 0o750
+	videoFileSuffix   = ".mp4"
 )
 
 // indexer manages metadata for video segments stored on disk.
@@ -164,11 +165,10 @@ func (ix *indexer) getDiskFiles() (map[string]os.FileInfo, error) {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".mp4") {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), videoFileSuffix) {
 			info, err := entry.Info()
 			if err != nil {
-				ix.logger.Warnw("failed to get FileInfo for disk file", "name", entry.Name(), "error", err)
-				continue
+				return nil, fmt.Errorf("failed to get FileInfo for disk file: %s, error: %w", entry.Name(), err)
 			}
 			fullPath := filepath.Join(ix.storagePath, entry.Name())
 			files[fullPath] = info

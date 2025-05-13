@@ -14,6 +14,8 @@ import (
 	"go.viam.com/test"
 )
 
+const numSegments = 8
+
 func TestGetStorageStateDoCommand(t *testing.T) {
 	storagePath, err := filepath.Abs(artifactStoragePath)
 	test.That(t, err, test.ShouldBeNil)
@@ -91,7 +93,7 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	vs, err := camera.FromRobot(r, videoStoreComponentName)
 	test.That(t, err, test.ShouldBeNil)
 
-	// Wait for the indexer to index at least one segment
+	// Wait for the indexer to index all segments
 	timeout := time.After(10 * time.Second)
 	tick := time.Tick(100 * time.Millisecond)
 	indexed := false
@@ -108,7 +110,7 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 			}
 			t.Logf("get-storage-state result: %+v", res)
 			videoList, ok := res["stored_video"].([]interface{})
-			if ok && len(videoList) > 0 {
+			if ok && len(videoList) == numSegments {
 				indexed = true
 			}
 		}
