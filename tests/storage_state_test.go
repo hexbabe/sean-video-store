@@ -135,7 +135,7 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	// Validate stored_video ranges
 	videoList, ok := res["stored_video"].([]interface{})
 	test.That(t, ok, test.ShouldBeTrue)
-	test.That(t, len(videoList), test.ShouldEqual, 8)
+	test.That(t, len(videoList), test.ShouldEqual, numSegments)
 	for _, item := range videoList {
 		entry, ok := item.(map[string]interface{})
 		test.That(t, ok, test.ShouldBeTrue)
