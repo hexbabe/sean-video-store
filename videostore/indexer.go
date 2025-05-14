@@ -155,7 +155,7 @@ func (ix *indexer) indexNewFiles(ctx context.Context) error {
 	if oldestDBFile != "" {
 		oldestDBTime, err = extractDateTimeFromFilename(oldestDBFile)
 		if err != nil {
-			return fmt.Errorf("corrupted DB entry: cannot parse filename %q: %w", oldestDBFile, err)
+			return fmt.Errorf("failed to parse filename of oldest db entry %q: %w", oldestDBFile, err)
 		}
 	}
 
@@ -169,8 +169,7 @@ func (ix *indexer) indexNewFiles(ctx context.Context) error {
 		if !oldestDBTime.IsZero() {
 			fileTime, err := extractDateTimeFromFilename(path)
 			if err != nil {
-				ix.logger.Warnw("failed to extract timestamp from filename, skipping", "file", path, "error", err)
-				continue
+				return fmt.Errorf("failed to extract timestamp from filename, skipping: %w", err)
 			}
 			if fileTime.Before(oldestDBTime) {
 				continue

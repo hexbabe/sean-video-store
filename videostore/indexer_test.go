@@ -40,6 +40,9 @@ func setupTestIndexer(t *testing.T) (*indexer, func()) {
 }
 
 // insertTestSegment inserts a segment record into the indexer's database.
+// For the purpose of testing getVideoList, the filePath can be any unique string e.g. "seg1", "seg2" etc.
+// getVideoList relies on the StartTimeUnix, DurationMs, and SizeBytes parameters
+// directly from the DB and does not parse the filePath for timestamp for these tests.
 func insertTestSegment(t *testing.T, idx *indexer, filePath string, startTimeUnix, durationMs, sizeBytes int64) {
 	t.Helper()
 	query := fmt.Sprintf(
