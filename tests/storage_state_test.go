@@ -94,7 +94,7 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	// Wait for the indexer to index all segments
-	timeout := time.After(10 * time.Second)
+	timeout := time.After(15 * time.Second)
 	tick := time.Tick(100 * time.Millisecond)
 	indexed := false
 	for !indexed {

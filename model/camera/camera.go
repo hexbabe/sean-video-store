@@ -155,7 +155,7 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 		}, nil
 	case "get-storage-state":
 		c.logger.Debug("get-storage-state command received")
-		state, err := c.videostore.GetStorageState()
+		state, err := c.videostore.GetStorageState(ctx)
 		if err != nil {
 			return nil, err
 		}

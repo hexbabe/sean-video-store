@@ -18,6 +18,9 @@ import (
 	"go.viam.com/utils"
 )
 
+// Allows for mocking in tests.
+var duStatfs = diskusage.Statfs
+
 // Model is the model for the video storage camera component.
 var Model = resource.ModelNamespace("viam").WithFamily("video").WithModel("storage")
 
@@ -26,10 +29,9 @@ const (
 	segmentSeconds = 30 // seconds
 	videoFormat    = "mp4"
 
-	deleterInterval = 1  // minutes
-	retryInterval   = 1  // seconds
-	asyncTimeout    = 60 // seconds
-	tempPath        = "/tmp"
+	retryInterval = 1  // seconds
+	asyncTimeout  = 60 // seconds
+	tempPath      = "/tmp"
 
 	// TimeFormat is how we format the timestamp in output filenames and do commands.
 	TimeFormat = "2006-01-02_15-04-05"
@@ -65,7 +67,7 @@ type VideoStore interface {
 	Fetch(ctx context.Context, r *FetchRequest) (*FetchResponse, error)
 	Save(ctx context.Context, r *SaveRequest) (*SaveResponse, error)
 	Close()
-	GetStorageState() (*StorageState, error)
+	GetStorageState(ctx context.Context) (*StorageState, error)
 }
 
 // CodecType repreasents a codec.
@@ -144,14 +146,14 @@ func (r *FetchRequest) Validate() error {
 
 // DiskUsageState represents disk usage information.
 type DiskUsageState struct {
-	StorageUsedGB            float64 `json:"storage_used_gb"`
-	StorageLimitGB           float64 `json:"storage_limit_gb"`
-	DeviceStorageRemainingGB float64 `json:"device_storage_remaining_gb"`
+	StorageUsedGB            float64
+	StorageLimitGB           float64
+	DeviceStorageRemainingGB float64
 }
 
 // StorageState summarizes the state of the stored video segments and storage config info.
 type StorageState struct {
-	VideoRanges
+	videoRanges
 	StorageLimitGB           int
 	DeviceStorageRemainingGB float64
 	StoragePath              string
@@ -206,7 +208,7 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 		return nil, err
 	}
 
-	vs.indexer = newIndexer(config.Storage.StoragePath, logger)
+	vs.indexer = newIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
 	err = vs.indexer.setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
@@ -224,7 +226,6 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 			config.FramePoller.Framerate,
 			encoder)
 	})
-	vs.workers.Add(vs.deleter)
 
 	return vs, nil
 }
@@ -254,7 +255,7 @@ func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, er
 		return nil, err
 	}
 
-	indexer := newIndexer(config.Storage.StoragePath, logger)
+	indexer := newIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
 	err = indexer.setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer for read-only videostore: %w", err)
@@ -303,7 +304,7 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 		return nil, err
 	}
 
-	indexer := newIndexer(config.Storage.StoragePath, logger)
+	indexer := newIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
 	err = indexer.setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
@@ -320,7 +321,6 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 	}
 
 	vs.workers.Add(func(ctx context.Context) { vs.indexer.run(ctx) })
-	vs.workers.Add(vs.deleter)
 	return vs, nil
 }
 
@@ -449,92 +449,6 @@ func (vs *videostore) processFrames(
 	}
 }
 
-// deleter is a go routine that cleans up old clips if storage is full. Runs on interval
-// and deletes the oldest clip until the storage size is below the configured max.
-func (vs *videostore) deleter(ctx context.Context) {
-	ticker := time.NewTicker(deleterInterval * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			// Perform the deletion of the oldest clips
-			if err := vs.cleanupStorage(); err != nil {
-				vs.logger.Errorw("failed to clean up storage using indexer", "error", err)
-				continue
-			}
-		}
-	}
-}
-
-func (vs *videostore) cleanupStorage() error {
-	maxStorageSizeBytes := int64(vs.config.Storage.SizeGB) * gigabyte
-	currentSizeBytes, err := getDirectorySize(vs.config.Storage.StoragePath)
-	if err != nil {
-		return fmt.Errorf("failed to get directory size: %w", err)
-	}
-	if currentSizeBytes < maxStorageSizeBytes {
-		return nil
-	}
-
-	bytesToDelete := currentSizeBytes - maxStorageSizeBytes
-	var bytesDeleted int64
-	var deletedFilePaths []string // accumulate paths successfully deleted from disk to be removed from index
-
-	allSegments, err := vs.indexer.getSegmentsAscTime()
-	if err != nil {
-		return fmt.Errorf("failed to get segments from indexer: %w", err)
-	}
-
-	if len(allSegments) == 0 {
-		vs.logger.Warn("cleanup required based on disk size, but indexer found no segments. Index might be corrupted or empty.")
-		return nil
-	}
-
-	vs.logger.Debugf("retrieved %d segments from indexer, starting deletion process", len(allSegments))
-
-	// Iterate over the segments, deleting oldest first until enough space is freed
-	for _, segment := range allSegments {
-		vs.logger.Debugf("Attempting to delete oldest segment: %s (size: %d bytes)", segment.FilePath, segment.SizeBytes)
-		err := os.Remove(segment.FilePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				vs.logger.Warnf("Segment file %s not found on disk, but was in index. Marking for index removal.", segment.FilePath)
-				deletedFilePaths = append(deletedFilePaths, segment.FilePath)
-			} else {
-				vs.logger.Errorw("Failed to delete segment file from disk", "path", segment.FilePath, "error", err)
-				continue
-			}
-		} else { // deletion successful
-			vs.logger.Infof("Deleted segment file: %s", segment.FilePath)
-			bytesDeleted += segment.SizeBytes
-			deletedFilePaths = append(deletedFilePaths, segment.FilePath)
-		}
-
-		if bytesDeleted >= bytesToDelete {
-			vs.logger.Debugf("deleted enough bytes (%d >= %d), stopping deletion loop", bytesDeleted, bytesToDelete)
-			break
-		}
-	}
-
-	if len(deletedFilePaths) > 0 {
-		vs.logger.Debugf("removing %d segments from index immediately after disk deletion attempts", len(deletedFilePaths))
-		if removeErr := vs.indexer.removeIndexedFiles(deletedFilePaths); removeErr != nil {
-			return fmt.Errorf("failed to update index after deleting/checking files: %w", removeErr)
-		}
-	}
-
-	vs.logger.Debugf(
-		"cleanup finished. Targeted %d bytes for deletion. "+
-			"Actually deleted approx %d bytes from disk over %d files.",
-		bytesToDelete,
-		bytesDeleted,
-		len(deletedFilePaths),
-	)
-	return nil
-}
-
 // asyncSave command will run the concat operation in the background.
 // It waits for the segment duration before running to ensure the last segment
 // is written to storage before concatenation.
@@ -560,10 +474,8 @@ func (vs *videostore) asyncSave(ctx context.Context, from, to time.Time, path st
 	}
 }
 
-// Close stops all background processes and releases resources.
+// Close closes the video storage camera component.
 func (vs *videostore) Close() {
-	var errs []error
-
 	if vs.workers != nil {
 		vs.workers.Stop()
 	}
@@ -571,48 +483,34 @@ func (vs *videostore) Close() {
 	if vs.indexer != nil {
 		if err := vs.indexer.close(); err != nil {
 			vs.logger.Errorw("error closing indexer", "error", err)
-			errs = append(errs, fmt.Errorf("indexer close: %w", err))
 		}
 	}
 
 	if vs.rawSegmenter != nil {
 		if err := vs.rawSegmenter.Close(); err != nil {
 			vs.logger.Errorw("error closing raw segmenter", "error", err)
-			errs = append(errs, fmt.Errorf("raw segmenter close: %w", err))
 		}
-	}
-
-	// Log composite error for debugging but don't return since this is a terminal operation
-	if len(errs) > 0 {
-		errMsg := "errors during close: "
-		for i, err := range errs {
-			if i > 0 {
-				errMsg += ", "
-			}
-			errMsg += err.Error()
-		}
-		vs.logger.Errorw(errMsg)
 	}
 }
 
 // GetStorageState returns the current storage state for this VideoStore using the indexer.
-func (vs *videostore) GetStorageState() (*StorageState, error) {
+func (vs *videostore) GetStorageState(ctx context.Context) (*StorageState, error) {
 	if vs.indexer == nil {
 		return nil, errors.New("indexer not initialized")
 	}
 
-	videoRanges, err := vs.indexer.getVideoList()
+	videoRangesResult, err := vs.indexer.getVideoList(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage state from indexer: %w", err)
 	}
 
 	storageState := StorageState{
-		VideoRanges: videoRanges,
+		videoRanges: videoRangesResult,
 	}
 	storageState.StorageLimitGB = vs.config.Storage.SizeGB
 	storageState.StoragePath = vs.config.Storage.StoragePath
 
-	fsUsage, err := diskusage.Statfs(vs.config.Storage.StoragePath)
+	fsUsage, err := duStatfs(vs.config.Storage.StoragePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get filesystem stats for remaining space: %w", err)
 	}
