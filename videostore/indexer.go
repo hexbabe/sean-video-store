@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +26,13 @@ const (
 	slopDuration           = 5 * time.Second
 )
 
+// diskFileEntry holds information about a file on disk being considered for indexing,
+// including its extracted timestamp.
+type diskFileEntry struct {
+	info os.FileInfo
+	time time.Time // extracted from the filename
+}
+
 // indexer manages metadata for video segments stored on disk.
 type indexer struct {
 	logger       logging.Logger
@@ -37,7 +45,7 @@ type indexer struct {
 
 // segmentMetadata holds metadata for an indexed segment.
 type segmentMetadata struct {
-	FilePath      string
+	FileName      string
 	StartTimeUnix int64
 	DurationMs    int64
 	SizeBytes     int64
@@ -77,11 +85,12 @@ func (ix *indexer) setup() error {
 func (ix *indexer) initializeDB() error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
-		file_path TEXT PRIMARY KEY,
+		file_name TEXT PRIMARY KEY,
 		start_time_unix INTEGER NOT NULL,
 		duration_ms INTEGER NOT NULL,
 		size_bytes INTEGER NOT NULL,
-		inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		deleted_at TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_start_time ON %s (start_time_unix);
 	`, segmentsTableName, segmentsTableName)
@@ -101,205 +110,231 @@ func (ix *indexer) run(ctx context.Context) {
 			ix.logger.Debug("indexer polling loop has stopped")
 			return
 		case <-ticker.C:
-			if err := ix.cleanupAndIndex(ctx); err != nil {
-				ix.logger.Errorw("error during indexer maintenance", "error", err)
-			}
+			ix.refreshIndexAndStorage(ctx)
 		}
 	}
 }
 
-func (ix *indexer) cleanupAndIndex(ctx context.Context) error {
-	// 1. Clean up db according to storage limits
-	deletedFilePaths, err := ix.cleanupDB(ctx)
-	if err != nil {
-		ix.logger.Errorw("failed to cleanup db", "error", err)
+func (ix *indexer) refreshIndexAndStorage(ctx context.Context) {
+	if !ix.setupDone {
+		ix.logger.Error("indexer setup not complete")
+		return
 	}
 
-	// 2. Delete disk files that were just deleted from db
-	for _, path := range deletedFilePaths {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err := os.Remove(path); err == nil {
-			ix.logger.Infof("deleted file from disk: %s", path)
-		} else {
-			ix.logger.Warnw("failed to delete file from disk", "file", path, "error", err)
-		}
-	}
-
-	// 3. Index new files
+	// 1. Index new files
 	if err := ix.indexNewFiles(ctx); err != nil {
-		return err
+		ix.logger.Errorw("error during indexNewFiles phase", "error", err)
 	}
-	return nil
+
+	// 2. Mark files to delete based on storage limits
+	if err := ix.cleanupDB(ctx); err != nil {
+		ix.logger.Errorw("error in cleanupDB phase (marking for deletion)", "error", err)
+	}
+
+	// 3. Delete marked files from disk and their records from DB
+	if err := ix.cleanupFiles(ctx); err != nil {
+		ix.logger.Errorw("error in cleanupFiles phase (hard deletion)", "error", err)
+	}
 }
 
 // indexNewFiles indexes new video files on disk.
 func (ix *indexer) indexNewFiles(ctx context.Context) error {
-	diskFiles, err := ix.getDiskFiles(ctx)
+	diskFileEntries, err := ix.getDiskFilesSorted(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get and sort disk files: %w", err)
 	}
+
 	indexedFiles, err := ix.getIndexedFiles(ctx)
 	if err != nil {
 		return err
 	}
 
-	// Query for the oldest DB file in order to determine if a file is new
-	var oldestDBFile string
-	row := ix.db.QueryRowContext(ctx, fmt.Sprintf("SELECT file_path FROM %s ORDER BY start_time_unix ASC LIMIT 1", segmentsTableName))
-	if err := row.Scan(&oldestDBFile); err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("failed to get oldest DB entry: %w", err)
-	}
-	var oldestDBTime time.Time
-	if oldestDBFile != "" {
-		oldestDBTime, err = extractDateTimeFromFilename(oldestDBFile)
-		if err != nil {
-			return fmt.Errorf("failed to parse filename of oldest db entry %q: %w", oldestDBFile, err)
-		}
-	}
-
-	for path, info := range diskFiles {
+	for _, entry := range diskFileEntries {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if _, exists := indexedFiles[path]; exists {
+
+		fileName := entry.info.Name()
+		if _, exists := indexedFiles[fileName]; exists {
 			continue
 		}
-		if !oldestDBTime.IsZero() {
-			fileTime, err := extractDateTimeFromFilename(path)
-			if err != nil {
-				return fmt.Errorf("failed to extract timestamp from filename, skipping: %w", err)
-			}
-			if fileTime.Before(oldestDBTime) {
-				continue
-			}
-		}
-		if err := ix.indexNewFile(path, info.Size()); err != nil {
-			ix.logger.Errorw("failed to index new file", "path", path, "error", err)
+
+		if err := ix.indexNewFile(fileName, entry.info.Size()); err != nil {
+			ix.logger.Errorw("failed to index new file", "name", fileName, "error", err)
 		}
 	}
+
 	return nil
 }
 
 // indexNewFile is a helper function that indexes a new video file in the db.
-func (ix *indexer) indexNewFile(filePath string, fileSize int64) error {
-	startTime, err := extractDateTimeFromFilename(filePath)
+func (ix *indexer) indexNewFile(fileName string, fileSize int64) error {
+	startTime, err := extractDateTimeFromFilename(fileName)
 	if err != nil {
-		ix.logger.Warnw("failed to extract timestamp from filename, skipping", "file", filePath, "error", err)
+		ix.logger.Warnw("failed to extract timestamp from filename, skipping", "file", fileName, "error", err)
 		return nil
 	}
 
-	info, err := getVideoInfo(filePath)
+	fullFilePath := filepath.Join(ix.storagePath, fileName)
+	info, err := getVideoInfo(fullFilePath)
 	if err != nil {
 		ix.logger.Debugf("failed to get video info, unreadable file will not be indexed: %w", err)
 		return nil
 	}
 	durationMs := info.duration.Milliseconds()
 
-	query := fmt.Sprintf("INSERT INTO %s (file_path, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);", segmentsTableName)
-	_, err = ix.db.Exec(query, filePath, startTime.Unix(), durationMs, fileSize)
+	query := fmt.Sprintf("INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);", segmentsTableName)
+	_, err = ix.db.Exec(query, fileName, startTime.Unix(), durationMs, fileSize)
 	if err != nil {
 		return fmt.Errorf("failed to insert segment into index: %w", err)
 	}
 
 	startTimeStr := FormatDateTimeString(startTime)
-	ix.logger.Debugw("indexed new file", "file", filePath, "start_time", startTimeStr, "duration_ms", durationMs, "size_bytes", fileSize)
+	ix.logger.Debugw("indexed new file", "file", fileName, "start_time", startTimeStr, "duration_ms", durationMs, "size_bytes", fileSize)
 	return nil
 }
 
-// cleanupDB deletes old records and returns the paths of the to-be-deleted segment files.
-func (ix *indexer) cleanupDB(ctx context.Context) ([]string, error) {
+// cleanupDB determines which segment files should be deleted based on storage limits
+// and marks them in the database by setting deleted_at.
+func (ix *indexer) cleanupDB(ctx context.Context) error {
 	maxStorageSizeBytes := int64(ix.storageMaxGB) * gigabyte
 	currentSizeBytes, err := getDirectorySize(ix.storagePath)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to get directory size for %s: %w", ix.storagePath, err)
 	}
 	if currentSizeBytes < maxStorageSizeBytes {
-		return nil, nil
+		return nil
 	}
 	bytesToDelete := currentSizeBytes - maxStorageSizeBytes
 
-	allSegments, err := ix.getSegmentsAscTime(ctx)
+	segments, err := ix.getSegmentsAscTime(ctx)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to get segments for cleanup: %w", err)
 	}
-	if len(allSegments) == 0 {
-		return nil, errors.New("cleanup required based on disk size, but indexer found no segments")
+	if len(segments) == 0 {
+		return errors.New("no segments found in index, but cleanup required based on disk size")
 	}
 
-	var (
-		pathsToDelete []string
-		bytesDeleted  int64
-	)
-	for _, segment := range allSegments {
+	var filesToMarkDeleted []string
+	var bytesIdentifiedForDeletion int64
+	for _, segment := range segments {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
-		pathsToDelete = append(pathsToDelete, segment.FilePath)
-		bytesDeleted += segment.SizeBytes
-		if bytesDeleted >= bytesToDelete {
+		filesToMarkDeleted = append(filesToMarkDeleted, segment.FileName)
+		bytesIdentifiedForDeletion += segment.SizeBytes
+		if bytesIdentifiedForDeletion >= bytesToDelete {
 			break
 		}
 	}
-	if len(pathsToDelete) == 0 {
-		return nil, nil
+	if len(filesToMarkDeleted) == 0 {
+		return nil
 	}
-	deletedFilePaths, err := ix.deleteSegmentsAndReturnPaths(ctx, pathsToDelete)
+
+	err = ix.markSegmentsAsDeleted(ctx, filesToMarkDeleted)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to mark segments as deleted in DB: %w", err)
 	}
-	ix.logger.Infof("deleted %d segments from db (soon to be deleted from disk): %v", len(deletedFilePaths), deletedFilePaths)
-	return deletedFilePaths, nil
+
+	return nil
 }
 
-// deleteSegmentsAndReturnPaths is a helper function that deletes segments from the DB
-// and returns the paths of the deleted segments.
-func (ix *indexer) deleteSegmentsAndReturnPaths(ctx context.Context, paths []string) ([]string, error) {
-	if !ix.setupDone {
-		return nil, errors.New("indexer setup not complete")
-	}
-	if len(paths) == 0 {
-		return nil, nil
+// markSegmentsAsDeleted sets the deleted_at timestamp for the given file names.
+func (ix *indexer) markSegmentsAsDeleted(ctx context.Context, names []string) error {
+	if len(names) == 0 {
+		return nil
 	}
 
-	// Build the SQL query
-	placeholders := make([]string, len(paths))
-	args := make([]interface{}, len(paths))
-	for i, path := range paths {
+	// Build up query
+	currentTime := time.Now().UTC()
+	placeholders := make([]string, len(names))
+	args := make([]interface{}, len(names)+1) // +1 for currentTime
+	args[0] = currentTime
+	for i, name := range names {
 		placeholders[i] = "?"
-		args[i] = path
+		args[i+1] = name
 	}
-	//nolint:gosec // this is safe because segmentsTableName is a constant and placeholders are '?'
-	query := fmt.Sprintf("DELETE FROM %s WHERE file_path IN (%s) RETURNING file_path;", segmentsTableName, strings.Join(placeholders, ", "))
+	//nolint:gosec // segmentsTableName is a constant, placeholders are '?'
+	query := fmt.Sprintf(
+		"UPDATE %s SET deleted_at = ? WHERE file_name IN (%s) AND deleted_at IS NULL", // Ensure we only mark active ones
+		segmentsTableName,
+		strings.Join(placeholders, ", "),
+	)
 
-	// QueryContext is used because the DELETE statement includes a RETURNING clause to get the deleted file paths.
-	rows, err := ix.db.QueryContext(ctx, query, args...)
+	_, err := ix.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("failed to execute mark segments as deleted: %w", err)
+	}
+	return nil
+}
+
+// cleanupFiles queries for segments marked with deleted_at,
+// deletes their files from disk, and then removes their records from the database.
+func (ix *indexer) cleanupFiles(ctx context.Context) error {
+	ix.logger.Debug("starting cleanupFiles: querying for segments marked as deleted")
+
+	query := fmt.Sprintf("SELECT file_name FROM %s WHERE deleted_at IS NOT NULL", segmentsTableName)
+	rows, err := ix.db.QueryContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to query for soft-deleted segments: %w", err)
 	}
 	defer rows.Close()
 
-	var deletedPaths []string
+	var filesToDelete []string
 	for rows.Next() {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
-		var filePath string
-		if err := rows.Scan(&filePath); err != nil {
-			return nil, err
+		var fileName string
+		if err := rows.Scan(&fileName); err != nil {
+			return fmt.Errorf("failed to scan soft-deleted segment path: %w", err)
 		}
-		deletedPaths = append(deletedPaths, filePath)
+		filesToDelete = append(filesToDelete, fileName)
 	}
-	return deletedPaths, rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating over soft-deleted segment paths: %w", err)
+	}
+
+	if len(filesToDelete) == 0 {
+		ix.logger.Debug("no soft-deleted segments found to process in cleanupFiles")
+		return nil
+	}
+
+	ix.logger.Infof("found %d segment(s) marked for deletion. Proceeding with file removal and DB hard delete.", len(filesToDelete))
+
+	for _, name := range filesToDelete {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		// 1. Delete from disk
+		fullFilePath := filepath.Join(ix.storagePath, name)
+		fileErr := os.Remove(fullFilePath)
+		if fileErr == nil {
+			ix.logger.Debugf("deleted file from disk: %s", fullFilePath)
+		} else if os.IsNotExist(fileErr) {
+			ix.logger.Warnf("file already deleted from disk or never existed: %s", fullFilePath)
+		} else {
+			return fmt.Errorf("failed to delete file from disk: %w", fileErr)
+		}
+
+		// 2. Hard delete from database
+		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE file_name = ?", segmentsTableName)
+		_, dbErr := ix.db.ExecContext(ctx, deleteQuery, name)
+		if dbErr != nil {
+			return fmt.Errorf("failed to hard-delete segment record from database: %w", dbErr)
+		}
+	}
+
+	return nil
 }
 
-// getIndexedFiles returns a map of all indexed video files from the db.
+// getIndexedFiles returns a map of all non-deleted indexed video file names from the db.
 func (ix *indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
 	if !ix.setupDone {
 		return nil, errors.New("indexer setup not complete")
 	}
-	query := "SELECT file_path FROM " + segmentsTableName + ";"
+	query := "SELECT file_name FROM " + segmentsTableName + " WHERE deleted_at IS NULL;"
 	rows, err := ix.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -311,37 +346,52 @@ func (ix *indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, er
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		var filePath string
-		if err := rows.Scan(&filePath); err != nil {
+		var fileName string
+		if err := rows.Scan(&fileName); err != nil {
 			return nil, err
 		}
-		files[filePath] = struct{}{}
+		files[fileName] = struct{}{}
 	}
 	return files, rows.Err()
 }
 
-// getDiskFiles returns a map of all video files on disk.
-func (ix *indexer) getDiskFiles(ctx context.Context) (map[string]os.FileInfo, error) {
-	files := make(map[string]os.FileInfo)
+// getDiskFilesSorted returns a slice of diskFileEntry for all valid video files on disk,
+// sorted by their extracted timestamp (newest first).
+// Files with unparseable names are logged and skipped.
+func (ix *indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, error) {
 	entries, err := os.ReadDir(ix.storagePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read storage directory %s: %w", ix.storagePath, err)
 	}
 
+	sortableFiles := make([]diskFileEntry, 0, len(entries))
 	for _, entry := range entries {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), videoFileSuffix) {
-			info, err := entry.Info()
-			if err != nil {
-				return nil, fmt.Errorf("failed to get FileInfo for disk file: %s, error: %w", entry.Name(), err)
-			}
-			fullPath := filepath.Join(ix.storagePath, entry.Name())
-			files[fullPath] = info
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), videoFileSuffix) {
+			continue
 		}
+
+		info, err := entry.Info()
+		if err != nil {
+			ix.logger.Warnw("failed to get FileInfo for disk entry, skipping", "entry_name", entry.Name(), "error", err)
+			continue
+		}
+
+		extractedTime, err := extractDateTimeFromFilename(info.Name())
+		if err != nil {
+			ix.logger.Warnw("failed to extract timestamp from filename, skipping file", "name", info.Name(), "error", err)
+			continue
+		}
+		sortableFiles = append(sortableFiles, diskFileEntry{info: info, time: extractedTime})
 	}
-	return files, nil
+
+	// Sort files by extracted time (newest first)
+	sort.Slice(sortableFiles, func(i, j int) bool {
+		return sortableFiles[i].time.After(sortableFiles[j].time)
+	})
+	return sortableFiles, nil
 }
 
 // videoRange represents a single contiguous block of stored video segments.
@@ -399,14 +449,16 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 	return videoRanges, nil
 }
 
-// getSegmentsAscTime is a helper function that retrieves all segment data from the database, ordered by start time.
+// getSegmentsAscTime is a helper function that retrieves all non-deleted segment data from the database,
+// ordered by start time.
 func (ix *indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, error) {
 	if !ix.setupDone {
 		return nil, errors.New("indexer setup not complete")
 	}
 	query := fmt.Sprintf(`
-	SELECT file_path, start_time_unix, duration_ms, size_bytes
+	SELECT file_name, start_time_unix, duration_ms, size_bytes
 	FROM %s
+	WHERE deleted_at IS NULL
 	ORDER BY start_time_unix ASC
 	`, segmentsTableName)
 
@@ -424,7 +476,7 @@ func (ix *indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, e
 		}
 		var sm segmentMetadata
 
-		if err := rows.Scan(&sm.FilePath, &sm.StartTimeUnix, &sm.DurationMs, &sm.SizeBytes); err != nil {
+		if err := rows.Scan(&sm.FileName, &sm.StartTimeUnix, &sm.DurationMs, &sm.SizeBytes); err != nil {
 			return nil, fmt.Errorf("failed to scan segment row during full query: %w", err)
 		}
 

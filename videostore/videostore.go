@@ -504,17 +504,15 @@ func (vs *videostore) GetStorageState(ctx context.Context) (*StorageState, error
 		return nil, fmt.Errorf("failed to get storage state from indexer: %w", err)
 	}
 
-	storageState := StorageState{
-		videoRanges: videoRangesResult,
-	}
-	storageState.StorageLimitGB = vs.config.Storage.SizeGB
-	storageState.StoragePath = vs.config.Storage.StoragePath
-
 	fsUsage, err := duStatfs(vs.config.Storage.StoragePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get filesystem stats for remaining space: %w", err)
 	}
-	storageState.DeviceStorageRemainingGB = float64(fsUsage.AvailableBytes) / float64(gigabyte)
 
-	return &storageState, nil
+	return &StorageState{
+		videoRanges:              videoRangesResult,
+		StorageLimitGB:           vs.config.Storage.SizeGB,
+		StoragePath:              vs.config.Storage.StoragePath,
+		DeviceStorageRemainingGB: float64(fsUsage.AvailableBytes) / float64(gigabyte),
+	}, nil
 }

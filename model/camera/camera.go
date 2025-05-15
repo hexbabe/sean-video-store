@@ -159,29 +159,7 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 		if err != nil {
 			return nil, err
 		}
-
-		disk := map[string]interface{}{
-			"storage_used_gb":             float64(state.TotalSizeBytes) / float64(gigabyte),
-			"storage_limit_gb":            float64(state.StorageLimitGB),
-			"device_storage_remaining_gb": state.DeviceStorageRemainingGB,
-			"storage_path":                state.StoragePath,
-		}
-
-		videoList := make([]map[string]interface{}, 0, len(state.Ranges))
-		for _, timeRange := range state.Ranges {
-			fromStr := videostore.FormatDateTimeString(timeRange.Start)
-			toStr := videostore.FormatDateTimeString(timeRange.End)
-			videoList = append(videoList, map[string]interface{}{
-				"from": fromStr,
-				"to":   toStr,
-			})
-		}
-
-		return map[string]interface{}{
-			"command":      "get-storage-state",
-			"disk_usage":   disk,
-			"stored_video": videoList,
-		}, nil
+		return GetStorageStateDoCommandResponse(state), nil
 	default:
 		return nil, errors.New("invalid command")
 	}

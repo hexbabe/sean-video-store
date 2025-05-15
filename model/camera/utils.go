@@ -95,3 +95,29 @@ func checkDeps(deps resource.Dependencies, config *Config, logger logging.Logger
 
 	return nil
 }
+
+// GetStorageStateDoCommandResponse converts a StorageState struct to a
+// do command response.
+func GetStorageStateDoCommandResponse(state *videostore.StorageState) map[string]interface{} {
+	disk := map[string]interface{}{
+		"storage_used_gb":             float64(state.TotalSizeBytes) / float64(gigabyte),
+		"storage_limit_gb":            float64(state.StorageLimitGB),
+		"device_storage_remaining_gb": state.DeviceStorageRemainingGB,
+		"storage_path":                state.StoragePath,
+	}
+
+	videoList := make([]map[string]interface{}, 0, len(state.Ranges))
+	for _, timeRange := range state.Ranges {
+		fromStr := videostore.FormatDateTimeString(timeRange.Start)
+		toStr := videostore.FormatDateTimeString(timeRange.End)
+		videoList = append(videoList, map[string]interface{}{
+			"from": fromStr,
+			"to":   toStr,
+		})
+	}
+
+	return map[string]interface{}{
+		"disk_usage":   disk,
+		"stored_video": videoList,
+	}
+}

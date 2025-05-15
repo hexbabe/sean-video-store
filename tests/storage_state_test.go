@@ -136,6 +136,9 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	videoList, ok := res["stored_video"].([]interface{})
 	test.That(t, ok, test.ShouldBeTrue)
 	test.That(t, len(videoList), test.ShouldEqual, numSegments)
+
+	var previousRangeToTime time.Time
+
 	for _, item := range videoList {
 		entry, ok := item.(map[string]interface{})
 		test.That(t, ok, test.ShouldBeTrue)
@@ -151,6 +154,21 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 		test.That(t, err, test.ShouldBeNil)
 		toTime, err := time.Parse(videostore.TimeFormat, strings.TrimSuffix(toStr, "Z"))
 		test.That(t, err, test.ShouldBeNil)
+
+		// Assert basic time validity
+		test.That(t, fromTime.IsZero(), test.ShouldBeFalse)
+		test.That(t, toTime.IsZero(), test.ShouldBeFalse)
 		test.That(t, fromTime.Before(toTime), test.ShouldBeTrue)
+
+		// All segment times should be before now
+		assertionTime := time.Now().UTC()
+		test.That(t, fromTime, test.ShouldHappenBefore, assertionTime)
+		test.That(t, toTime, test.ShouldHappenBefore, assertionTime)
+
+		// Assert sorted order and no overlap with the previous range
+		if !previousRangeToTime.IsZero() { // skip for the first segment
+			test.That(t, fromTime, test.ShouldHappenAfter, previousRangeToTime)
+		}
+		previousRangeToTime = toTime
 	}
 }
