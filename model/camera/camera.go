@@ -169,8 +169,8 @@ func (c *component) DoCommand(ctx context.Context, command map[string]interface{
 
 		videoList := make([]map[string]interface{}, 0, len(state.Ranges))
 		for _, timeRange := range state.Ranges {
-			fromStr := timeRange.Start.UTC().Format(videostore.TimeFormat) + "Z"
-			toStr := timeRange.End.UTC().Format(videostore.TimeFormat) + "Z"
+			fromStr := videostore.FormatDateTimeString(timeRange.Start)
+			toStr := videostore.FormatDateTimeString(timeRange.End)
 			videoList = append(videoList, map[string]interface{}{
 				"from": fromStr,
 				"to":   toStr,

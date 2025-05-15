@@ -255,6 +255,11 @@ func ParseDateTimeString(datetime string) (time.Time, error) {
 	return time.ParseInLocation(TimeFormat, datetime, time.Local)
 }
 
+// FormatDateTimeString formats a datetime to a string in UTC with a Z suffix.
+func FormatDateTimeString(datetime time.Time) string {
+	return datetime.UTC().Format(TimeFormat) + "Z"
+}
+
 // matchStorageToRange identifies video files that overlap with the requested time range (start to end)
 // and returns them as FFmpeg concat demuxer entries with appropriate trim points.
 //

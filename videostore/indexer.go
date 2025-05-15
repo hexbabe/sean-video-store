@@ -203,7 +203,7 @@ func (ix *indexer) indexNewFile(filePath string, fileSize int64) error {
 		return fmt.Errorf("failed to insert segment into index: %w", err)
 	}
 
-	startTimeStr := startTime.UTC().Format(TimeFormat) + "Z"
+	startTimeStr := FormatDateTimeString(startTime)
 	ix.logger.Debugw("indexed new file", "file", filePath, "start_time", startTimeStr, "duration_ms", durationMs, "size_bytes", fileSize)
 	return nil
 }
