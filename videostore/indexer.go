@@ -271,7 +271,7 @@ func (ix *indexer) deleteSegmentsAndReturnPaths(ctx context.Context, paths []str
 		args[i] = path
 	}
 	//nolint:gosec // this is safe because segmentsTableName is a constant and placeholders are '?'
-	query := fmt.Sprintf("DELETE FROM %s WHERE file_path IN (%s) RETURNING file_path", segmentsTableName, strings.Join(placeholders, ", "))
+	query := fmt.Sprintf("DELETE FROM %s WHERE file_path IN (%s) RETURNING file_path;", segmentsTableName, strings.Join(placeholders, ", "))
 
 	// QueryContext is used because the DELETE statement includes a RETURNING clause to get the deleted file paths.
 	rows, err := ix.db.QueryContext(ctx, query, args...)
