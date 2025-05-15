@@ -371,7 +371,6 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 	}
 
 	var prevRange *videoRange
-
 	for _, s := range segments {
 		videoRanges.VideoCount++
 		videoRanges.TotalDurationMs += s.DurationMs
@@ -384,6 +383,7 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 			prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
 		} else {
 			if segmentStart.After(prevRange.End.Add(slopDuration)) {
+				// make a new range as there is too big of a gap between the prev segment and the new segment
 				videoRanges.Ranges = append(videoRanges.Ranges, *prevRange)
 				prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
 			} else {
