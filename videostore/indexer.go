@@ -387,6 +387,7 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 				videoRanges.Ranges = append(videoRanges.Ranges, *prevRange)
 				prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
 			} else {
+				// extend range
 				prevRange.End = segmentEnd
 			}
 		}
