@@ -370,7 +370,7 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 		return videoRanges, nil
 	}
 
-	var currentRange *videoRange
+	var prevRange *videoRange
 
 	for _, s := range segments {
 		videoRanges.VideoCount++
@@ -380,19 +380,19 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 		segmentStart := time.Unix(s.StartTimeUnix, 0)
 		segmentEnd := segmentStart.Add(time.Duration(s.DurationMs) * time.Millisecond)
 
-		if currentRange == nil {
-			currentRange = &videoRange{Start: segmentStart, End: segmentEnd}
+		if prevRange == nil {
+			prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
 		} else {
-			if segmentStart.After(currentRange.End.Add(slopDuration)) {
-				videoRanges.Ranges = append(videoRanges.Ranges, *currentRange)
-				currentRange = &videoRange{Start: segmentStart, End: segmentEnd}
+			if segmentStart.After(prevRange.End.Add(slopDuration)) {
+				videoRanges.Ranges = append(videoRanges.Ranges, *prevRange)
+				prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
 			} else {
-				currentRange.End = segmentEnd
+				prevRange.End = segmentEnd
 			}
 		}
 	}
-	if currentRange != nil {
-		videoRanges.Ranges = append(videoRanges.Ranges, *currentRange)
+	if prevRange != nil {
+		videoRanges.Ranges = append(videoRanges.Ranges, *prevRange)
 	}
 
 	return videoRanges, nil
