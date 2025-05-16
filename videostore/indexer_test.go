@@ -67,10 +67,10 @@ func TestGetVideoList(t *testing.T) {
 			name:             "no segments",
 			segmentsToInsert: []segmentMetadata{},
 			expectedRanges: videoRanges{
-				TotalSizeBytes:  0,
-				TotalDurationMs: 0,
-				VideoCount:      0,
-				Ranges:          []videoRange{},
+				StorageUsedBytes: 0,
+				TotalDurationMs:  0,
+				VideoCount:       0,
+				Ranges:           []videoRange{},
 			},
 		},
 		{
@@ -79,9 +79,9 @@ func TestGetVideoList(t *testing.T) {
 				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 10000, SizeBytes: 100},
 			},
 			expectedRanges: videoRanges{
-				TotalSizeBytes:  100,
-				TotalDurationMs: 10000,
-				VideoCount:      1,
+				StorageUsedBytes: 100,
+				TotalDurationMs:  10000,
+				VideoCount:       1,
 				Ranges: []videoRange{
 					{Start: baseTime, End: baseTime.Add(10 * time.Second)},
 				},
@@ -104,9 +104,9 @@ func TestGetVideoList(t *testing.T) {
 				}, // Starts at 00:00:10
 			},
 			expectedRanges: videoRanges{
-				TotalSizeBytes:  250,
-				TotalDurationMs: 20000,
-				VideoCount:      2,
+				StorageUsedBytes: 250,
+				TotalDurationMs:  20000,
+				VideoCount:       2,
 				Ranges: []videoRange{
 					{
 						Start: baseTime,
@@ -132,9 +132,9 @@ func TestGetVideoList(t *testing.T) {
 				}, // starts at 00:00:12 (2s gap)
 			},
 			expectedRanges: videoRanges{
-				TotalSizeBytes:  250,
-				TotalDurationMs: 20000,
-				VideoCount:      2,
+				StorageUsedBytes: 250,
+				TotalDurationMs:  20000,
+				VideoCount:       2,
 				Ranges: []videoRange{
 					{
 						Start: baseTime,
@@ -161,9 +161,9 @@ func TestGetVideoList(t *testing.T) {
 				},
 			},
 			expectedRanges: videoRanges{
-				TotalSizeBytes:  250,
-				TotalDurationMs: 20000,
-				VideoCount:      2,
+				StorageUsedBytes: 250,
+				TotalDurationMs:  20000,
+				VideoCount:       2,
 				Ranges: []videoRange{
 					{Start: baseTime, End: baseTime.Add(10 * time.Second).Add(slopDuration).Add(10 * time.Second)},
 				},
@@ -186,9 +186,9 @@ func TestGetVideoList(t *testing.T) {
 				},
 			},
 			expectedRanges: videoRanges{
-				TotalSizeBytes:  250,
-				TotalDurationMs: 20000,
-				VideoCount:      2,
+				StorageUsedBytes: 250,
+				TotalDurationMs:  20000,
+				VideoCount:       2,
 				Ranges: []videoRange{
 					{
 						Start: baseTime,
@@ -236,9 +236,9 @@ func TestGetVideoList(t *testing.T) {
 				}, // R3: 00:01:00 - 00:01:10 (sep)
 			},
 			expectedRanges: videoRanges{
-				TotalSizeBytes:  100 + 150 + 200 + 250 + 300,
-				TotalDurationMs: 10000 * 5,
-				VideoCount:      5,
+				StorageUsedBytes: 100 + 150 + 200 + 250 + 300,
+				TotalDurationMs:  10000 * 5,
+				VideoCount:       5,
 				Ranges: []videoRange{
 					{
 						Start: baseTime,
@@ -269,7 +269,7 @@ func TestGetVideoList(t *testing.T) {
 			resultRanges, err := idx.getVideoList(context.Background())
 			test.That(t, err, test.ShouldBeNil)
 
-			test.That(t, resultRanges.TotalSizeBytes, test.ShouldEqual, tc.expectedRanges.TotalSizeBytes)
+			test.That(t, resultRanges.StorageUsedBytes, test.ShouldEqual, tc.expectedRanges.StorageUsedBytes)
 			test.That(t, resultRanges.TotalDurationMs, test.ShouldEqual, tc.expectedRanges.TotalDurationMs)
 			test.That(t, resultRanges.VideoCount, test.ShouldEqual, tc.expectedRanges.VideoCount)
 
@@ -310,7 +310,6 @@ func setupTestIndexerWithStoragePath(t *testing.T, storagePath string, storageMa
 	cleanup := func() {
 		err := idx.close()
 		test.That(t, err, test.ShouldBeNil)
-		// The temporary storagePath directory created by t.TempDir() will be cleaned up automatically.
 	}
 	return idx, cleanup
 }

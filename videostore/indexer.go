@@ -22,7 +22,7 @@ const (
 	dbFileMode             = 0o750
 	segmentsTableName      = "segments"
 	videoFileSuffix        = ".mp4"
-	indexerPollingInterval = 10 * time.Second
+	indexerRefreshInterval = 10 * time.Second
 	slopDuration           = 5 * time.Second
 )
 
@@ -100,14 +100,14 @@ func (ix *indexer) initializeDB() error {
 }
 
 func (ix *indexer) run(ctx context.Context) {
-	ix.logger.Debug("starting Indexer polling loop")
-	ticker := time.NewTicker(indexerPollingInterval)
+	ix.logger.Debug("starting indexer event loop")
+	ticker := time.NewTicker(indexerRefreshInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			ix.logger.Debug("indexer polling loop has stopped")
+			ix.logger.Debug("indexer event loop has stopped")
 			return
 		case <-ticker.C:
 			ix.refreshIndexAndStorage(ctx)
@@ -256,15 +256,24 @@ func (ix *indexer) markSegmentsAsDeleted(ctx context.Context, names []string) er
 	}
 	//nolint:gosec // segmentsTableName is a constant, placeholders are '?'
 	query := fmt.Sprintf(
-		"UPDATE %s SET deleted_at = ? WHERE file_name IN (%s) AND deleted_at IS NULL", // Ensure we only mark active ones
+		"UPDATE %s SET deleted_at = ? WHERE file_name IN (%s) AND deleted_at IS NULL;",
 		segmentsTableName,
 		strings.Join(placeholders, ", "),
 	)
 
-	_, err := ix.db.ExecContext(ctx, query, args...)
+	result, err := ix.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to execute mark segments as deleted: %w", err)
 	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if int(rowsAffected) != len(names) {
+		return fmt.Errorf("expected to mark %d segments as deleted, but only %d were affected", len(names), rowsAffected)
+	}
+
 	return nil
 }
 
@@ -273,13 +282,14 @@ func (ix *indexer) markSegmentsAsDeleted(ctx context.Context, names []string) er
 func (ix *indexer) cleanupFiles(ctx context.Context) error {
 	ix.logger.Debug("starting cleanupFiles: querying for segments marked as deleted")
 
-	query := fmt.Sprintf("SELECT file_name FROM %s WHERE deleted_at IS NOT NULL", segmentsTableName)
+	query := fmt.Sprintf("SELECT file_name FROM %s WHERE deleted_at IS NOT NULL;", segmentsTableName)
 	rows, err := ix.db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to query for soft-deleted segments: %w", err)
 	}
 	defer rows.Close()
 
+	// Scan db and accumulate files to be deleted (marked for deletion as per deleted_at)
 	var filesToDelete []string
 	for rows.Next() {
 		if ctx.Err() != nil {
@@ -300,14 +310,12 @@ func (ix *indexer) cleanupFiles(ctx context.Context) error {
 		return nil
 	}
 
-	ix.logger.Infof("found %d segment(s) marked for deletion. Proceeding with file removal and DB hard delete.", len(filesToDelete))
-
 	for _, name := range filesToDelete {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// 1. Delete from disk
+		// Delete from disk
 		fullFilePath := filepath.Join(ix.storagePath, name)
 		fileErr := os.Remove(fullFilePath)
 		if fileErr == nil {
@@ -318,8 +326,8 @@ func (ix *indexer) cleanupFiles(ctx context.Context) error {
 			return fmt.Errorf("failed to delete file from disk: %w", fileErr)
 		}
 
-		// 2. Hard delete from database
-		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE file_name = ?", segmentsTableName)
+		// Hard delete from database
+		deleteQuery := fmt.Sprintf("DELETE FROM %s WHERE file_name = ?;", segmentsTableName)
 		_, dbErr := ix.db.ExecContext(ctx, deleteQuery, name)
 		if dbErr != nil {
 			return fmt.Errorf("failed to hard-delete segment record from database: %w", dbErr)
@@ -331,9 +339,6 @@ func (ix *indexer) cleanupFiles(ctx context.Context) error {
 
 // getIndexedFiles returns a map of all non-deleted indexed video file names from the db.
 func (ix *indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
-	if !ix.setupDone {
-		return nil, errors.New("indexer setup not complete")
-	}
 	query := "SELECT file_name FROM " + segmentsTableName + " WHERE deleted_at IS NULL;"
 	rows, err := ix.db.QueryContext(ctx, query)
 	if err != nil {
@@ -369,6 +374,7 @@ func (ix *indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, err
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), videoFileSuffix) {
 			continue
 		}
@@ -384,6 +390,7 @@ func (ix *indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, err
 			ix.logger.Warnw("failed to extract timestamp from filename, skipping file", "name", info.Name(), "error", err)
 			continue
 		}
+
 		sortableFiles = append(sortableFiles, diskFileEntry{info: info, time: extractedTime})
 	}
 
@@ -402,14 +409,18 @@ type videoRange struct {
 
 // videoRanges summarizes the state of the stored video segments.
 type videoRanges struct {
-	TotalSizeBytes  int64
-	TotalDurationMs int64
-	VideoCount      int
-	Ranges          []videoRange
+	StorageUsedBytes int64
+	TotalDurationMs  int64
+	VideoCount       int
+	Ranges           []videoRange
 }
 
 // getVideoList returns the full list of video range structs from the db.
 func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
+	if !ix.setupDone {
+		return videoRanges{}, errors.New("indexer setup not complete")
+	}
+
 	segments, err := ix.getSegmentsAscTime(ctx)
 	if err != nil {
 		return videoRanges{}, fmt.Errorf("failed to fetch segments for state: %w", err)
@@ -424,7 +435,7 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 	for _, s := range segments {
 		videoRanges.VideoCount++
 		videoRanges.TotalDurationMs += s.DurationMs
-		videoRanges.TotalSizeBytes += s.SizeBytes
+		videoRanges.StorageUsedBytes += s.SizeBytes
 
 		segmentStart := time.Unix(s.StartTimeUnix, 0)
 		segmentEnd := segmentStart.Add(time.Duration(s.DurationMs) * time.Millisecond)
@@ -452,14 +463,11 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 // getSegmentsAscTime is a helper function that retrieves all non-deleted segment data from the database,
 // ordered by start time.
 func (ix *indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, error) {
-	if !ix.setupDone {
-		return nil, errors.New("indexer setup not complete")
-	}
 	query := fmt.Sprintf(`
 	SELECT file_name, start_time_unix, duration_ms, size_bytes
 	FROM %s
 	WHERE deleted_at IS NULL
-	ORDER BY start_time_unix ASC
+	ORDER BY start_time_unix ASC;
 	`, segmentsTableName)
 
 	rows, err := ix.db.QueryContext(ctx, query)
