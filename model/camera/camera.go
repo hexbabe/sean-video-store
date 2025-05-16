@@ -39,7 +39,6 @@ const (
 	retryInterval   = 1                // seconds
 	asyncTimeout    = 60               // seconds
 	tempPath        = "/tmp"
-	gigabyte        = 1024 * 1024 * 1024
 )
 
 type component struct {

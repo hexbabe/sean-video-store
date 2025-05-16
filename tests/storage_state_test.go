@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/viam-modules/video-store/videostore"
+	vsutils "github.com/viam-modules/video-store/videostore/utils"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/test"
 )
@@ -150,9 +150,9 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 		test.That(t, strings.HasSuffix(fromStr, "Z"), test.ShouldBeTrue)
 		test.That(t, strings.HasSuffix(toStr, "Z"), test.ShouldBeTrue)
 
-		fromTime, err := time.Parse(videostore.TimeFormat, strings.TrimSuffix(fromStr, "Z"))
+		fromTime, err := time.Parse(vsutils.TimeFormat, strings.TrimSuffix(fromStr, "Z"))
 		test.That(t, err, test.ShouldBeNil)
-		toTime, err := time.Parse(videostore.TimeFormat, strings.TrimSuffix(toStr, "Z"))
+		toTime, err := time.Parse(vsutils.TimeFormat, strings.TrimSuffix(toStr, "Z"))
 		test.That(t, err, test.ShouldBeNil)
 
 		// Assert basic time validity

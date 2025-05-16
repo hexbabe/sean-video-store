@@ -9,11 +9,12 @@ import (
 
 	"github.com/viam-modules/video-store/model/camera"
 	"github.com/viam-modules/video-store/videostore"
+	vsutils "github.com/viam-modules/video-store/videostore/utils"
 	"go.viam.com/rdk/logging"
 )
 
 func main() {
-	videostore.SetLibAVLogLevel("debug")
+	vsutils.SetLibAVLogLevel("debug")
 	ctx := context.Background()
 	//nolint:mnd
 	if len(os.Args) != 3 {

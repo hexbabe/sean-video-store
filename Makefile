@@ -57,18 +57,18 @@ endif
 ifeq ($(SOURCE_OS),darwin)
 	SUBST = $(HOMEBREW_PREFIX)/Cellar/x264/r3108/lib/libx264.a
 endif
-CGO_LDFLAGS = $(subst -lx264, $(SUBST),$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --libs $(FFMPEG_LIBS))) 
+CGO_LDFLAGS := $(subst -lx264, $(SUBST),$(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH) pkg-config --libs $(FFMPEG_LIBS))) -ldl
 export PATH := $(PATH):$(shell go env GOPATH)/bin
 
 .PHONY: lint tool-install test clean clean-all clean-ffmpeg module build valgrind valgrind-run
 
 all: $(FFMPEG_BUILD) $(BIN_OUTPUT_PATH)/video-store $(BIN_OUTPUT_PATH)/concat
 
-$(BIN_OUTPUT_PATH)/video-store: videostore/*.go cmd/module/*.go videostore/*.c videostore/*.h $(FFMPEG_BUILD)
+$(BIN_OUTPUT_PATH)/video-store: $(shell find videostore -name '*.go') cmd/module/*.go $(shell find videostore -name '*.c') $(shell find videostore -name '*.h') $(FFMPEG_BUILD)
 	go mod tidy
 	CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go build -o $(BIN_OUTPUT_PATH)/video-store cmd/module/cmd.go
 
-$(BIN_OUTPUT_PATH)/concat: videostore/*.go cmd/concat/*.go $(FFMPEG_BUILD)
+$(BIN_OUTPUT_PATH)/concat: $(shell find videostore -name '*.go') cmd/concat/*.go $(shell find videostore -name '*.c') $(shell find videostore -name '*.h') $(FFMPEG_BUILD)
 	go mod tidy
 	CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS="$(CGO_CFLAGS)" go build -o $(BIN_OUTPUT_PATH)/concat cmd/concat/cmd.go
 
@@ -104,7 +104,7 @@ $(BIN_OUTPUT_PATH)/video-info-c: $(FFMPEG_BUILD) $(OBJS) | $(BUILD_DIR) $(BIN_OU
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	@echo "-------- Make $(@) --------"
 	rm -f $@
-	$(CC) $(CGO_LDFLAGS) $(CGO_CFLAGS) -g -c -o $@ $<
+	$(CC) $(CGO_LDFLAGS) $(CGO_CFLAGS) -I$(dir $<) -g -c -o $@ $<
 
 $(BUILD_DIR):
 	@echo "-------- mkdir $(@) --------"
