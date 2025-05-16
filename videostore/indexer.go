@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	// Blank importing SQLite3 driver for its side-effects.
@@ -40,7 +41,7 @@ type indexer struct {
 	storageMaxGB int
 	dbPath       string
 	db           *sql.DB
-	setupDone    bool
+	setupDone    atomic.Bool
 }
 
 // segmentMetadata holds metadata for an indexed segment.
@@ -63,7 +64,7 @@ func newIndexer(storagePath string, storageMaxGB int, logger logging.Logger) *in
 }
 
 func (ix *indexer) setup() error {
-	if ix.setupDone {
+	if ix.setupDone.Load() {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(ix.dbPath), dbFileMode); err != nil {
@@ -78,22 +79,22 @@ func (ix *indexer) setup() error {
 		_ = ix.db.Close()
 		return fmt.Errorf("failed to initialize index db schema: %w", err)
 	}
-	ix.setupDone = true
+	ix.setupDone.Store(true)
 	return nil
 }
 
 func (ix *indexer) initializeDB() error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
-		file_name TEXT PRIMARY KEY,
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		file_name TEXT NOT NULL,
 		start_time_unix INTEGER NOT NULL,
 		duration_ms INTEGER NOT NULL,
 		size_bytes INTEGER NOT NULL,
 		inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		deleted_at TIMESTAMP
 	);
-	CREATE INDEX IF NOT EXISTS idx_start_time ON %s (start_time_unix);
-	`, segmentsTableName, segmentsTableName)
+	`, segmentsTableName)
 
 	_, err := ix.db.Exec(query)
 	return err
@@ -116,25 +117,35 @@ func (ix *indexer) run(ctx context.Context) {
 }
 
 func (ix *indexer) refreshIndexAndStorage(ctx context.Context) {
-	if !ix.setupDone {
+	if !ix.setupDone.Load() {
 		ix.logger.Error("indexer setup not complete")
 		return
 	}
 
+	start := time.Now()
+
 	// 1. Index new files
+	indexStart := time.Now()
 	if err := ix.indexNewFiles(ctx); err != nil {
 		ix.logger.Errorw("error during indexNewFiles phase", "error", err)
 	}
+	ix.logger.Debugf("TIMING: indexNewFiles took %v", time.Since(indexStart))
 
 	// 2. Mark files to delete based on storage limits
+	cleanupDBStart := time.Now()
 	if err := ix.cleanupDB(ctx); err != nil {
 		ix.logger.Errorw("error in cleanupDB phase (marking for deletion)", "error", err)
 	}
+	ix.logger.Debugf("TIMING: cleanupDB took %v", time.Since(cleanupDBStart))
 
 	// 3. Delete marked files from disk and their records from DB
+	cleanupFilesStart := time.Now()
 	if err := ix.cleanupFiles(ctx); err != nil {
 		ix.logger.Errorw("error in cleanupFiles phase (hard deletion)", "error", err)
 	}
+	ix.logger.Debugf("TIMING: cleanupFiles took %v", time.Since(cleanupFilesStart))
+
+	ix.logger.Debugf("TIMING: refreshIndexAndStorage completed in %v", time.Since(start))
 }
 
 // indexNewFiles indexes new video files on disk.
@@ -339,6 +350,9 @@ func (ix *indexer) cleanupFiles(ctx context.Context) error {
 
 // getIndexedFiles returns a map of all non-deleted indexed video file names from the db.
 func (ix *indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
+	if !ix.setupDone.Load() {
+		return nil, errors.New("indexer setup not complete")
+	}
 	query := "SELECT file_name FROM " + segmentsTableName + " WHERE deleted_at IS NULL;"
 	rows, err := ix.db.QueryContext(ctx, query)
 	if err != nil {
@@ -417,25 +431,32 @@ type videoRanges struct {
 
 // getVideoList returns the full list of video range structs from the db.
 func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
-	if !ix.setupDone {
+	if !ix.setupDone.Load() {
 		return videoRanges{}, errors.New("indexer setup not complete")
 	}
 
+	start := time.Now()
 	segments, err := ix.getSegmentsAscTime(ctx)
 	if err != nil {
 		return videoRanges{}, fmt.Errorf("failed to fetch segments for state: %w", err)
 	}
+	ix.logger.Debugf("TIMING: getting segments asc time took %v", time.Since(start))
 
-	var videoRanges videoRanges
+	return getVideoRangesFromSegments(segments), nil
+}
+
+// getVideoRangesFromSegments processes a slice of segment metadata to produce videoRanges.
+func getVideoRangesFromSegments(segments []segmentMetadata) videoRanges {
+	var vr videoRanges
 	if len(segments) == 0 {
-		return videoRanges, nil
+		return vr
 	}
 
 	var prevRange *videoRange
 	for _, s := range segments {
-		videoRanges.VideoCount++
-		videoRanges.TotalDurationMs += s.DurationMs
-		videoRanges.StorageUsedBytes += s.SizeBytes
+		vr.VideoCount++
+		vr.TotalDurationMs += s.DurationMs
+		vr.StorageUsedBytes += s.SizeBytes
 
 		segmentStart := time.Unix(s.StartTimeUnix, 0)
 		segmentEnd := segmentStart.Add(time.Duration(s.DurationMs) * time.Millisecond)
@@ -445,7 +466,7 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 		} else {
 			if segmentStart.After(prevRange.End.Add(slopDuration)) {
 				// make a new range as there is too big of a gap between the prev segment and the new segment
-				videoRanges.Ranges = append(videoRanges.Ranges, *prevRange)
+				vr.Ranges = append(vr.Ranges, *prevRange)
 				prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
 			} else {
 				// extend range
@@ -454,15 +475,17 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 		}
 	}
 	if prevRange != nil {
-		videoRanges.Ranges = append(videoRanges.Ranges, *prevRange)
+		vr.Ranges = append(vr.Ranges, *prevRange)
 	}
-
-	return videoRanges, nil
+	return vr
 }
 
 // getSegmentsAscTime is a helper function that retrieves all non-deleted segment data from the database,
 // ordered by start time.
 func (ix *indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, error) {
+	if !ix.setupDone.Load() {
+		return nil, errors.New("indexer setup not complete")
+	}
 	query := fmt.Sprintf(`
 	SELECT file_name, start_time_unix, duration_ms, size_bytes
 	FROM %s
@@ -500,12 +523,12 @@ func (ix *indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, e
 }
 
 func (ix *indexer) close() error {
-	if ix.setupDone {
+	if ix.setupDone.Load() {
 		err := ix.db.Close()
 		if err != nil {
 			return fmt.Errorf("error closing index db: %w", err)
 		}
-		ix.setupDone = false
+		ix.setupDone.Store(false)
 		ix.logger.Debug("indexer closed")
 	}
 	return nil

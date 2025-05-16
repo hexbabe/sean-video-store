@@ -32,7 +32,7 @@ func setupTestIndexer(t *testing.T) (*indexer, func()) {
 
 	err = idx.initializeDB()
 	test.That(t, err, test.ShouldBeNil)
-	idx.setupDone = true
+	idx.setupDone.Store(true)
 
 	cleanup := func() {
 		err := idx.close()
@@ -305,7 +305,7 @@ func setupTestIndexerWithStoragePath(t *testing.T, storagePath string, storageMa
 
 	err = idx.initializeDB()
 	test.That(t, err, test.ShouldBeNil)
-	idx.setupDone = true
+	idx.setupDone.Store(true)
 
 	cleanup := func() {
 		err := idx.close()
