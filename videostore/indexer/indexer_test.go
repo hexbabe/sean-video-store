@@ -1,4 +1,4 @@
-package videostore
+package indexer
 
 import (
 	"context"
@@ -18,9 +18,9 @@ import (
 
 // setupTestIndexer creates and initializes an indexer with an in-memory SQLite database for testing.
 // It returns the indexer instance and a cleanup function.
-func setupTestIndexer(t *testing.T) (*indexer, func()) {
+func setupTestIndexer(t *testing.T) (*Indexer, func()) {
 	t.Helper()
-	idx := newIndexer("", 1, logging.NewTestLogger(t))
+	idx := NewIndexer("", 1, logging.NewTestLogger(t))
 
 	// Explicitly set dbPath to an in-memory database for actual testing to avoid disk I/O.
 	inMemoryDBPath := fmt.Sprintf("file:%s?mode=memory&cache=shared", filepath.Join("", "test_index.sqlite.db"))
@@ -35,7 +35,7 @@ func setupTestIndexer(t *testing.T) (*indexer, func()) {
 	idx.setupDone.Store(true)
 
 	cleanup := func() {
-		err := idx.close()
+		err := idx.Close()
 		test.That(t, err, test.ShouldBeNil)
 	}
 	return idx, cleanup
@@ -45,7 +45,7 @@ func setupTestIndexer(t *testing.T) (*indexer, func()) {
 // For the purpose of testing getVideoList, the fileName can be any unique string e.g. "seg1", "seg2" etc.
 // getVideoList relies on the StartTimeUnix, DurationMs, and SizeBytes parameters
 // directly from the DB and does not parse the fileName for timestamp for these tests.
-func insertTestSegment(t *testing.T, idx *indexer, fileName string, startTimeUnix, durationMs, sizeBytes int64) {
+func insertTestSegment(t *testing.T, idx *Indexer, fileName string, startTimeUnix, durationMs, sizeBytes int64) {
 	t.Helper()
 	query := fmt.Sprintf(
 		"INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
@@ -61,16 +61,16 @@ func TestGetVideoList(t *testing.T) {
 	testCases := []struct {
 		name             string
 		segmentsToInsert []segmentMetadata
-		expectedRanges   videoRanges
+		expectedRanges   VideoRanges
 	}{
 		{
 			name:             "no segments",
 			segmentsToInsert: []segmentMetadata{},
-			expectedRanges: videoRanges{
+			expectedRanges: VideoRanges{
 				StorageUsedBytes: 0,
 				TotalDurationMs:  0,
 				VideoCount:       0,
-				Ranges:           []videoRange{},
+				Ranges:           []VideoRange{},
 			},
 		},
 		{
@@ -78,11 +78,11 @@ func TestGetVideoList(t *testing.T) {
 			segmentsToInsert: []segmentMetadata{
 				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 10000, SizeBytes: 100},
 			},
-			expectedRanges: videoRanges{
+			expectedRanges: VideoRanges{
 				StorageUsedBytes: 100,
 				TotalDurationMs:  10000,
 				VideoCount:       1,
-				Ranges: []videoRange{
+				Ranges: []VideoRange{
 					{Start: baseTime, End: baseTime.Add(10 * time.Second)},
 				},
 			},
@@ -103,11 +103,11 @@ func TestGetVideoList(t *testing.T) {
 					SizeBytes:     150,
 				}, // Starts at 00:00:10
 			},
-			expectedRanges: videoRanges{
+			expectedRanges: VideoRanges{
 				StorageUsedBytes: 250,
 				TotalDurationMs:  20000,
 				VideoCount:       2,
-				Ranges: []videoRange{
+				Ranges: []VideoRange{
 					{
 						Start: baseTime,
 						End:   baseTime.Add(20 * time.Second),
@@ -131,11 +131,11 @@ func TestGetVideoList(t *testing.T) {
 					SizeBytes:     150,
 				}, // starts at 00:00:12 (2s gap)
 			},
-			expectedRanges: videoRanges{
+			expectedRanges: VideoRanges{
 				StorageUsedBytes: 250,
 				TotalDurationMs:  20000,
 				VideoCount:       2,
-				Ranges: []videoRange{
+				Ranges: []VideoRange{
 					{
 						Start: baseTime,
 						End:   baseTime.Add(12 * time.Second).Add(10 * time.Second), // merged range ends at end of seg2
@@ -160,11 +160,11 @@ func TestGetVideoList(t *testing.T) {
 					SizeBytes:     150,
 				},
 			},
-			expectedRanges: videoRanges{
+			expectedRanges: VideoRanges{
 				StorageUsedBytes: 250,
 				TotalDurationMs:  20000,
 				VideoCount:       2,
-				Ranges: []videoRange{
+				Ranges: []VideoRange{
 					{Start: baseTime, End: baseTime.Add(10 * time.Second).Add(slopDuration).Add(10 * time.Second)},
 				},
 			},
@@ -185,11 +185,11 @@ func TestGetVideoList(t *testing.T) {
 					SizeBytes:     150,
 				},
 			},
-			expectedRanges: videoRanges{
+			expectedRanges: VideoRanges{
 				StorageUsedBytes: 250,
 				TotalDurationMs:  20000,
 				VideoCount:       2,
-				Ranges: []videoRange{
+				Ranges: []VideoRange{
 					{
 						Start: baseTime,
 						End:   baseTime.Add(10 * time.Second),
@@ -235,11 +235,11 @@ func TestGetVideoList(t *testing.T) {
 					SizeBytes:     300,
 				}, // R3: 00:01:00 - 00:01:10 (sep)
 			},
-			expectedRanges: videoRanges{
+			expectedRanges: VideoRanges{
 				StorageUsedBytes: 100 + 150 + 200 + 250 + 300,
 				TotalDurationMs:  10000 * 5,
 				VideoCount:       5,
-				Ranges: []videoRange{
+				Ranges: []VideoRange{
 					{
 						Start: baseTime,
 						End:   baseTime.Add(20 * time.Second),
@@ -266,7 +266,7 @@ func TestGetVideoList(t *testing.T) {
 				insertTestSegment(t, idx, seg.FileName, seg.StartTimeUnix, seg.DurationMs, seg.SizeBytes)
 			}
 
-			resultRanges, err := idx.getVideoList(context.Background())
+			resultRanges, err := idx.GetVideoList(context.Background())
 			test.That(t, err, test.ShouldBeNil)
 
 			test.That(t, resultRanges.StorageUsedBytes, test.ShouldEqual, tc.expectedRanges.StorageUsedBytes)
@@ -288,9 +288,9 @@ func TestGetVideoList(t *testing.T) {
 
 // setupTestIndexerWithStoragePath creates and initializes an indexer with a given storage path
 // and an in-memory SQLite database for testing.
-func setupTestIndexerWithStoragePath(t *testing.T, storagePath string, storageMaxGB int) (*indexer, func()) {
+func setupTestIndexerWithStoragePath(t *testing.T, storagePath string, storageMaxGB int) (*Indexer, func()) {
 	t.Helper()
-	idx := newIndexer(storagePath, storageMaxGB, logging.NewTestLogger(t))
+	idx := NewIndexer(storagePath, storageMaxGB, logging.NewTestLogger(t))
 
 	err := os.MkdirAll(storagePath, 0o750)
 	test.That(t, err, test.ShouldBeNil)
@@ -308,7 +308,7 @@ func setupTestIndexerWithStoragePath(t *testing.T, storagePath string, storageMa
 	idx.setupDone.Store(true)
 
 	cleanup := func() {
-		err := idx.close()
+		err := idx.Close()
 		test.That(t, err, test.ShouldBeNil)
 	}
 	return idx, cleanup

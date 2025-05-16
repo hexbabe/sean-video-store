@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/viam-modules/video-store/videostore/indexer"
+	vsutils "github.com/viam-modules/video-store/videostore/utils"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
@@ -32,9 +34,6 @@ const (
 	retryInterval = 1  // seconds
 	asyncTimeout  = 60 // seconds
 	tempPath      = "/tmp"
-
-	// TimeFormat is how we format the timestamp in output filenames and do commands.
-	TimeFormat = "2006-01-02_15-04-05"
 )
 
 var presets = map[string]struct{}{
@@ -59,7 +58,7 @@ type videostore struct {
 
 	rawSegmenter *RawSegmenter
 	concater     *concater
-	indexer      *indexer
+	indexer      *indexer.Indexer
 }
 
 // VideoStore stores video and provides APIs to request the stored video.
@@ -153,7 +152,7 @@ type DiskUsageState struct {
 
 // StorageState summarizes the state of the stored video segments and storage config info.
 type StorageState struct {
-	videoRanges
+	VideoRanges              indexer.VideoRanges
 	StorageLimitGB           int
 	DeviceStorageRemainingGB float64
 	StoragePath              string
@@ -175,10 +174,10 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 		config:      config,
 		workers:     utils.NewBackgroundStoppableWorkers(),
 	}
-	if err := createDir(config.Storage.StoragePath); err != nil {
+	if err := vsutils.CreateDir(config.Storage.StoragePath); err != nil {
 		return nil, err
 	}
-	err := createDir(vs.config.Storage.UploadPath)
+	err := vsutils.CreateDir(vs.config.Storage.UploadPath)
 	if err != nil {
 		return nil, err
 	}
@@ -208,13 +207,13 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 		return nil, err
 	}
 
-	vs.indexer = newIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
-	err = vs.indexer.setup()
+	vs.indexer = indexer.NewIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
+	err = vs.indexer.Setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
 
-	vs.workers.Add(func(ctx context.Context) { vs.indexer.run(ctx) })
+	vs.workers.Add(func(ctx context.Context) { vs.indexer.Run(ctx) })
 	vs.workers.Add(func(ctx context.Context) {
 		vs.fetchFrames(
 			ctx,
@@ -239,10 +238,10 @@ func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, er
 		return nil, err
 	}
 
-	if err := createDir(config.Storage.StoragePath); err != nil {
+	if err := vsutils.CreateDir(config.Storage.StoragePath); err != nil {
 		return nil, err
 	}
-	if err := createDir(config.Storage.UploadPath); err != nil {
+	if err := vsutils.CreateDir(config.Storage.UploadPath); err != nil {
 		return nil, err
 	}
 
@@ -255,8 +254,8 @@ func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, er
 		return nil, err
 	}
 
-	indexer := newIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
-	err = indexer.setup()
+	indexer := indexer.NewIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
+	err = indexer.Setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer for read-only videostore: %w", err)
 	}
@@ -280,10 +279,10 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 		return nil, err
 	}
 
-	if err := createDir(config.Storage.StoragePath); err != nil {
+	if err := vsutils.CreateDir(config.Storage.StoragePath); err != nil {
 		return nil, err
 	}
-	if err := createDir(config.Storage.UploadPath); err != nil {
+	if err := vsutils.CreateDir(config.Storage.UploadPath); err != nil {
 		return nil, err
 	}
 
@@ -304,8 +303,8 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 		return nil, err
 	}
 
-	indexer := newIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
-	err = indexer.setup()
+	indexer := indexer.NewIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
+	err = indexer.Setup()
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
@@ -320,7 +319,7 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 		workers:      utils.NewBackgroundStoppableWorkers(),
 	}
 
-	vs.workers.Add(func(ctx context.Context) { vs.indexer.run(ctx) })
+	vs.workers.Add(func(ctx context.Context) { vs.indexer.Run(ctx) })
 	return vs, nil
 }
 
@@ -337,7 +336,7 @@ func (vs *videostore) Fetch(_ context.Context, r *FetchRequest) (*FetchResponse,
 		return nil, err
 	}
 	vs.logger.Debug("fetch command received and validated")
-	fetchFilePath := generateOutputFilePath(
+	fetchFilePath := vsutils.GenerateOutputFilePath(
 		vs.config.Storage.OutputFileNamePrefix,
 		r.From,
 		"",
@@ -359,7 +358,7 @@ func (vs *videostore) Fetch(_ context.Context, r *FetchRequest) (*FetchResponse,
 		vs.logger.Error("failed to concat files ", err)
 		return nil, err
 	}
-	videoBytes, err := readVideoFile(fetchFilePath)
+	videoBytes, err := vsutils.ReadVideoFile(fetchFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +374,7 @@ func (vs *videostore) Save(_ context.Context, r *SaveRequest) (*SaveResponse, er
 		return nil, err
 	}
 	vs.logger.Debug("save command received and validated")
-	uploadFilePath := generateOutputFilePath(
+	uploadFilePath := vsutils.GenerateOutputFilePath(
 		vs.config.Storage.OutputFileNamePrefix,
 		r.From,
 		r.Metadata,
@@ -481,7 +480,7 @@ func (vs *videostore) Close() {
 	}
 
 	if vs.indexer != nil {
-		if err := vs.indexer.close(); err != nil {
+		if err := vs.indexer.Close(); err != nil {
 			vs.logger.Errorw("error closing indexer", "error", err)
 		}
 	}
@@ -499,7 +498,7 @@ func (vs *videostore) GetStorageState(ctx context.Context) (*StorageState, error
 		return nil, errors.New("indexer not initialized")
 	}
 
-	videoRangesResult, err := vs.indexer.getVideoList(ctx)
+	videoRangesResult, err := vs.indexer.GetVideoList(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get storage state from indexer: %w", err)
 	}
@@ -510,7 +509,7 @@ func (vs *videostore) GetStorageState(ctx context.Context) (*StorageState, error
 	}
 
 	return &StorageState{
-		videoRanges:              videoRangesResult,
+		VideoRanges:              videoRangesResult,
 		StorageLimitGB:           vs.config.Storage.SizeGB,
 		StoragePath:              vs.config.Storage.StoragePath,
 		DeviceStorageRemainingGB: float64(fsUsage.AvailableBytes) / float64(gigabyte),

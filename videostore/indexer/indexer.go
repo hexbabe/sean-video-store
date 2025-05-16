@@ -1,4 +1,5 @@
-package videostore
+// Package indexer manages metadata for video files stored on disk.
+package indexer
 
 import (
 	"context"
@@ -15,6 +16,7 @@ import (
 	// Blank importing SQLite3 driver for its side-effects.
 	// This registers the "sqlite3" driver with the database/sql package.
 	_ "github.com/mattn/go-sqlite3"
+	vsutils "github.com/viam-modules/video-store/videostore/utils"
 	"go.viam.com/rdk/logging"
 )
 
@@ -34,8 +36,8 @@ type diskFileEntry struct {
 	time time.Time // extracted from the filename
 }
 
-// indexer manages metadata for video segments stored on disk.
-type indexer struct {
+// Indexer manages metadata for video segments stored on disk.
+type Indexer struct {
 	logger       logging.Logger
 	storagePath  string
 	storageMaxGB int
@@ -52,10 +54,10 @@ type segmentMetadata struct {
 	SizeBytes     int64
 }
 
-// newIndexer creates a new indexer instance.
-func newIndexer(storagePath string, storageMaxGB int, logger logging.Logger) *indexer {
+// NewIndexer creates a new indexer instance.
+func NewIndexer(storagePath string, storageMaxGB int, logger logging.Logger) *Indexer {
 	dbPath := filepath.Join(storagePath, dbFileName)
-	return &indexer{
+	return &Indexer{
 		logger:       logger,
 		storagePath:  storagePath,
 		storageMaxGB: storageMaxGB,
@@ -63,7 +65,8 @@ func newIndexer(storagePath string, storageMaxGB int, logger logging.Logger) *in
 	}
 }
 
-func (ix *indexer) setup() error {
+// Setup initializes the underlying database and readies it for use.
+func (ix *Indexer) Setup() error {
 	if ix.setupDone.Load() {
 		return nil
 	}
@@ -83,7 +86,7 @@ func (ix *indexer) setup() error {
 	return nil
 }
 
-func (ix *indexer) initializeDB() error {
+func (ix *Indexer) initializeDB() error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,7 +103,8 @@ func (ix *indexer) initializeDB() error {
 	return err
 }
 
-func (ix *indexer) run(ctx context.Context) {
+// Run starts the indexer event loop.
+func (ix *Indexer) Run(ctx context.Context) {
 	ix.logger.Debug("starting indexer event loop")
 	ticker := time.NewTicker(indexerRefreshInterval)
 	defer ticker.Stop()
@@ -116,7 +120,7 @@ func (ix *indexer) run(ctx context.Context) {
 	}
 }
 
-func (ix *indexer) refreshIndexAndStorage(ctx context.Context) {
+func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	if !ix.setupDone.Load() {
 		ix.logger.Error("indexer setup not complete")
 		return
@@ -149,7 +153,7 @@ func (ix *indexer) refreshIndexAndStorage(ctx context.Context) {
 }
 
 // indexNewFiles indexes new video files on disk.
-func (ix *indexer) indexNewFiles(ctx context.Context) error {
+func (ix *Indexer) indexNewFiles(ctx context.Context) error {
 	diskFileEntries, err := ix.getDiskFilesSorted(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get and sort disk files: %w", err)
@@ -179,20 +183,20 @@ func (ix *indexer) indexNewFiles(ctx context.Context) error {
 }
 
 // indexNewFile is a helper function that indexes a new video file in the db.
-func (ix *indexer) indexNewFile(fileName string, fileSize int64) error {
-	startTime, err := extractDateTimeFromFilename(fileName)
+func (ix *Indexer) indexNewFile(fileName string, fileSize int64) error {
+	startTime, err := vsutils.ExtractDateTimeFromFilename(fileName)
 	if err != nil {
 		ix.logger.Warnw("failed to extract timestamp from filename, skipping", "file", fileName, "error", err)
 		return nil
 	}
 
 	fullFilePath := filepath.Join(ix.storagePath, fileName)
-	info, err := getVideoInfo(fullFilePath)
+	info, err := vsutils.GetVideoInfo(fullFilePath)
 	if err != nil {
 		ix.logger.Debugf("failed to get video info, unreadable file will not be indexed: %w", err)
 		return nil
 	}
-	durationMs := info.duration.Milliseconds()
+	durationMs := info.Duration.Milliseconds()
 
 	query := fmt.Sprintf("INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);", segmentsTableName)
 	_, err = ix.db.Exec(query, fileName, startTime.Unix(), durationMs, fileSize)
@@ -200,16 +204,16 @@ func (ix *indexer) indexNewFile(fileName string, fileSize int64) error {
 		return fmt.Errorf("failed to insert segment into index: %w", err)
 	}
 
-	startTimeStr := FormatDateTimeString(startTime)
+	startTimeStr := vsutils.FormatDateTimeString(startTime)
 	ix.logger.Debugw("indexed new file", "file", fileName, "start_time", startTimeStr, "duration_ms", durationMs, "size_bytes", fileSize)
 	return nil
 }
 
 // cleanupDB determines which segment files should be deleted based on storage limits
 // and marks them in the database by setting deleted_at.
-func (ix *indexer) cleanupDB(ctx context.Context) error {
-	maxStorageSizeBytes := int64(ix.storageMaxGB) * gigabyte
-	currentSizeBytes, err := getDirectorySize(ix.storagePath)
+func (ix *Indexer) cleanupDB(ctx context.Context) error {
+	maxStorageSizeBytes := int64(ix.storageMaxGB) * vsutils.Gigabyte
+	currentSizeBytes, err := vsutils.GetDirectorySize(ix.storagePath)
 	if err != nil {
 		return fmt.Errorf("failed to get directory size for %s: %w", ix.storagePath, err)
 	}
@@ -227,14 +231,14 @@ func (ix *indexer) cleanupDB(ctx context.Context) error {
 	}
 
 	var filesToMarkDeleted []string
-	var bytesIdentifiedForDeletion int64
+	var bytesMarkedForDeletion int64
 	for _, segment := range segments {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		filesToMarkDeleted = append(filesToMarkDeleted, segment.FileName)
-		bytesIdentifiedForDeletion += segment.SizeBytes
-		if bytesIdentifiedForDeletion >= bytesToDelete {
+		bytesMarkedForDeletion += segment.SizeBytes
+		if bytesMarkedForDeletion >= bytesToDelete {
 			break
 		}
 	}
@@ -251,7 +255,7 @@ func (ix *indexer) cleanupDB(ctx context.Context) error {
 }
 
 // markSegmentsAsDeleted sets the deleted_at timestamp for the given file names.
-func (ix *indexer) markSegmentsAsDeleted(ctx context.Context, names []string) error {
+func (ix *Indexer) markSegmentsAsDeleted(ctx context.Context, names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -290,7 +294,7 @@ func (ix *indexer) markSegmentsAsDeleted(ctx context.Context, names []string) er
 
 // cleanupFiles queries for segments marked with deleted_at,
 // deletes their files from disk, and then removes their records from the database.
-func (ix *indexer) cleanupFiles(ctx context.Context) error {
+func (ix *Indexer) cleanupFiles(ctx context.Context) error {
 	ix.logger.Debug("starting cleanupFiles: querying for segments marked as deleted")
 
 	query := fmt.Sprintf("SELECT file_name FROM %s WHERE deleted_at IS NOT NULL;", segmentsTableName)
@@ -349,7 +353,7 @@ func (ix *indexer) cleanupFiles(ctx context.Context) error {
 }
 
 // getIndexedFiles returns a map of all non-deleted indexed video file names from the db.
-func (ix *indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
+func (ix *Indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
 	if !ix.setupDone.Load() {
 		return nil, errors.New("indexer setup not complete")
 	}
@@ -377,7 +381,7 @@ func (ix *indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, er
 // getDiskFilesSorted returns a slice of diskFileEntry for all valid video files on disk,
 // sorted by their extracted timestamp (newest first).
 // Files with unparseable names are logged and skipped.
-func (ix *indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, error) {
+func (ix *Indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, error) {
 	entries, err := os.ReadDir(ix.storagePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read storage directory %s: %w", ix.storagePath, err)
@@ -399,7 +403,7 @@ func (ix *indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, err
 			continue
 		}
 
-		extractedTime, err := extractDateTimeFromFilename(info.Name())
+		extractedTime, err := vsutils.ExtractDateTimeFromFilename(info.Name())
 		if err != nil {
 			ix.logger.Warnw("failed to extract timestamp from filename, skipping file", "name", info.Name(), "error", err)
 			continue
@@ -415,30 +419,30 @@ func (ix *indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, err
 	return sortableFiles, nil
 }
 
-// videoRange represents a single contiguous block of stored video segments.
-type videoRange struct {
+// VideoRange represents a single contiguous block of stored video segments.
+type VideoRange struct {
 	Start time.Time
 	End   time.Time
 }
 
-// videoRanges summarizes the state of the stored video segments.
-type videoRanges struct {
+// VideoRanges summarizes the state of the stored video segments.
+type VideoRanges struct {
 	StorageUsedBytes int64
 	TotalDurationMs  int64
 	VideoCount       int
-	Ranges           []videoRange
+	Ranges           []VideoRange
 }
 
-// getVideoList returns the full list of video range structs from the db.
-func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
+// GetVideoList returns the full list of video range structs from the db.
+func (ix *Indexer) GetVideoList(ctx context.Context) (VideoRanges, error) {
 	if !ix.setupDone.Load() {
-		return videoRanges{}, errors.New("indexer setup not complete")
+		return VideoRanges{}, errors.New("indexer setup not complete")
 	}
 
 	start := time.Now()
 	segments, err := ix.getSegmentsAscTime(ctx)
 	if err != nil {
-		return videoRanges{}, fmt.Errorf("failed to fetch segments for state: %w", err)
+		return VideoRanges{}, fmt.Errorf("failed to fetch segments for state: %w", err)
 	}
 	ix.logger.Debugf("TIMING: getting segments asc time took %v", time.Since(start))
 
@@ -446,13 +450,13 @@ func (ix *indexer) getVideoList(ctx context.Context) (videoRanges, error) {
 }
 
 // getVideoRangesFromSegments processes a slice of segment metadata to produce videoRanges.
-func getVideoRangesFromSegments(segments []segmentMetadata) videoRanges {
-	var vr videoRanges
+func getVideoRangesFromSegments(segments []segmentMetadata) VideoRanges {
+	var vr VideoRanges
 	if len(segments) == 0 {
 		return vr
 	}
 
-	var prevRange *videoRange
+	var prevRange *VideoRange
 	for _, s := range segments {
 		vr.VideoCount++
 		vr.TotalDurationMs += s.DurationMs
@@ -462,12 +466,12 @@ func getVideoRangesFromSegments(segments []segmentMetadata) videoRanges {
 		segmentEnd := segmentStart.Add(time.Duration(s.DurationMs) * time.Millisecond)
 
 		if prevRange == nil {
-			prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
+			prevRange = &VideoRange{Start: segmentStart, End: segmentEnd}
 		} else {
 			if segmentStart.After(prevRange.End.Add(slopDuration)) {
 				// make a new range as there is too big of a gap between the prev segment and the new segment
 				vr.Ranges = append(vr.Ranges, *prevRange)
-				prevRange = &videoRange{Start: segmentStart, End: segmentEnd}
+				prevRange = &VideoRange{Start: segmentStart, End: segmentEnd}
 			} else {
 				// extend range
 				prevRange.End = segmentEnd
@@ -482,7 +486,7 @@ func getVideoRangesFromSegments(segments []segmentMetadata) videoRanges {
 
 // getSegmentsAscTime is a helper function that retrieves all non-deleted segment data from the database,
 // ordered by start time.
-func (ix *indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, error) {
+func (ix *Indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, error) {
 	if !ix.setupDone.Load() {
 		return nil, errors.New("indexer setup not complete")
 	}
@@ -522,7 +526,8 @@ func (ix *indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, e
 	return segments, nil
 }
 
-func (ix *indexer) close() error {
+// Close closes the indexer and the underlying database.
+func (ix *Indexer) Close() error {
 	if ix.setupDone.Load() {
 		err := ix.db.Close()
 		if err != nil {

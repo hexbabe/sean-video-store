@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/viam-modules/video-store/videostore"
+	vsutils "github.com/viam-modules/video-store/videostore/utils"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 )
@@ -26,7 +27,7 @@ func parseTimeRange(command map[string]interface{}) (from, to time.Time, err err
 	if !ok {
 		return time.Time{}, time.Time{}, errors.New("from timestamp not found")
 	}
-	from, err = videostore.ParseDateTimeString(fromStr)
+	from, err = vsutils.ParseDateTimeString(fromStr)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
@@ -34,7 +35,7 @@ func parseTimeRange(command map[string]interface{}) (from, to time.Time, err err
 	if !ok {
 		return time.Time{}, time.Time{}, errors.New("to timestamp not found")
 	}
-	to, err = videostore.ParseDateTimeString(toStr)
+	to, err = vsutils.ParseDateTimeString(toStr)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
@@ -100,16 +101,16 @@ func checkDeps(deps resource.Dependencies, config *Config, logger logging.Logger
 // do command response.
 func GetStorageStateDoCommandResponse(state *videostore.StorageState) map[string]interface{} {
 	diskUsage := map[string]interface{}{
-		"storage_used_gb":             float64(state.StorageUsedBytes) / float64(gigabyte),
+		"storage_used_gb":             float64(state.VideoRanges.StorageUsedBytes) / float64(vsutils.Gigabyte),
 		"storage_limit_gb":            float64(state.StorageLimitGB),
 		"device_storage_remaining_gb": state.DeviceStorageRemainingGB,
 		"storage_path":                state.StoragePath,
 	}
 
-	videoList := make([]map[string]interface{}, 0, len(state.Ranges))
-	for _, timeRange := range state.Ranges {
-		fromStr := videostore.FormatDateTimeString(timeRange.Start)
-		toStr := videostore.FormatDateTimeString(timeRange.End)
+	videoList := make([]map[string]interface{}, 0, len(state.VideoRanges.Ranges))
+	for _, timeRange := range state.VideoRanges.Ranges {
+		fromStr := vsutils.FormatDateTimeString(timeRange.Start)
+		toStr := vsutils.FormatDateTimeString(timeRange.End)
 		videoList = append(videoList, map[string]interface{}{
 			"from": fromStr,
 			"to":   toStr,

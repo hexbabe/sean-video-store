@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/viam-modules/video-store/videostore"
+	vsutils "github.com/viam-modules/video-store/videostore/utils"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/test"
 )
@@ -157,11 +157,11 @@ func TestSaveDoCommand(t *testing.T) {
 		test.That(t, ok, test.ShouldBeTrue)
 
 		// Calculate expected timestamp from fromTime
-		fromTime, err := time.Parse(videostore.TimeFormat, validFromTimestamp)
+		fromTime, err := time.Parse(vsutils.TimeFormat, validFromTimestamp)
 		test.That(t, err, test.ShouldBeNil)
 		expectedFilename := fmt.Sprintf("%s_%s_%s.mp4",
 			videoStoreComponentName,
-			fromTime.Format(videostore.TimeFormat),
+			fromTime.Format(vsutils.TimeFormat),
 			"test-metadata")
 		test.That(t, filename, test.ShouldEqual, expectedFilename)
 		test.That(t, filename, test.ShouldContainSubstring, "test-metadata")
@@ -238,12 +238,12 @@ func TestSaveDoCommand(t *testing.T) {
 		test.That(t, ok, test.ShouldBeTrue)
 
 		// Calculate expected timestamp from fromTime (parsed as UTC, converted to local for filename)
-		fromTimeUTC, err := time.Parse(videostore.TimeFormat, "2024-09-06_15-00-33") // Parse without Z
+		fromTimeUTC, err := time.Parse(vsutils.TimeFormat, "2024-09-06_15-00-33") // Parse without Z
 		test.That(t, err, test.ShouldBeNil)
 		fromTimeLocal := fromTimeUTC.Local() // Convert to local time for filename generation
 		expectedFilename := fmt.Sprintf("%s_%s_%s.mp4",
 			videoStoreComponentName,
-			fromTimeLocal.Format(videostore.TimeFormat),
+			fromTimeLocal.Format(vsutils.TimeFormat),
 			"test-metadata-utc")
 		test.That(t, filename, test.ShouldEqual, expectedFilename)
 		test.That(t, filename, test.ShouldContainSubstring, "test-metadata-utc")
@@ -287,8 +287,8 @@ func TestSaveDoCommand(t *testing.T) {
 		fromTime := now.Add(-5 * time.Second)
 		toTime := now
 
-		fromTimeStr := fromTime.Format(videostore.TimeFormat)
-		toTimeStr := toTime.Format(videostore.TimeFormat)
+		fromTimeStr := fromTime.Format(vsutils.TimeFormat)
+		toTimeStr := toTime.Format(vsutils.TimeFormat)
 
 		saveCmdNow := map[string]interface{}{
 			"command":  "save",
@@ -306,7 +306,7 @@ func TestSaveDoCommand(t *testing.T) {
 
 		expectedFilename := fmt.Sprintf("%s_%s_%s.mp4",
 			videoStoreComponentName,
-			fromTime.Format(videostore.TimeFormat),
+			fromTime.Format(vsutils.TimeFormat),
 			"test-metadata")
 		test.That(t, filename, test.ShouldEqual, expectedFilename)
 
