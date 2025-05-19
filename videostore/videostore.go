@@ -143,13 +143,6 @@ func (r *FetchRequest) Validate() error {
 	return nil
 }
 
-// DiskUsageState represents disk usage information.
-type DiskUsageState struct {
-	StorageUsedGB            float64
-	StorageLimitGB           float64
-	DeviceStorageRemainingGB float64
-}
-
 // StorageState summarizes the state of the stored video segments and storage config info.
 type StorageState struct {
 	VideoRanges              indexer.VideoRanges
@@ -512,6 +505,6 @@ func (vs *videostore) GetStorageState(ctx context.Context) (*StorageState, error
 		VideoRanges:              videoRangesResult,
 		StorageLimitGB:           vs.config.Storage.SizeGB,
 		StoragePath:              vs.config.Storage.StoragePath,
-		DeviceStorageRemainingGB: float64(fsUsage.AvailableBytes) / float64(gigabyte),
+		DeviceStorageRemainingGB: float64(fsUsage.AvailableBytes) / float64(vsutils.Gigabyte),
 	}, nil
 }
