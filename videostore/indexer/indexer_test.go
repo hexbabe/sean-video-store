@@ -286,6 +286,94 @@ func TestGetVideoList(t *testing.T) {
 	}
 }
 
+func TestGetVideoRangesFromSegments(t *testing.T) {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	testCases := []struct {
+		name           string
+		segments       []segmentMetadata
+		expectedRanges VideoRanges
+	}{
+		{
+			name:           "empty segments",
+			segments:       []segmentMetadata{},
+			expectedRanges: VideoRanges{},
+		},
+		{
+			name: "zero duration segment",
+			segments: []segmentMetadata{
+				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 0, SizeBytes: 100},
+			},
+			expectedRanges: VideoRanges{
+				StorageUsedBytes: 100,
+				TotalDurationMs:  0,
+				VideoCount:       1,
+				Ranges: []VideoRange{
+					{Start: baseTime, End: baseTime},
+				},
+			},
+		},
+		{
+			name: "multiple slop duration gaps",
+			segments: []segmentMetadata{
+				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 10000, SizeBytes: 100},
+				{FileName: "seg2.mp4", StartTimeUnix: baseTime.Add(20 * time.Second).Unix(), DurationMs: 10000, SizeBytes: 150},
+				{FileName: "seg3.mp4", StartTimeUnix: baseTime.Add(40 * time.Second).Unix(), DurationMs: 10000, SizeBytes: 200},
+			},
+			expectedRanges: VideoRanges{
+				StorageUsedBytes: 450,
+				TotalDurationMs:  30000,
+				VideoCount:       3,
+				Ranges: []VideoRange{
+					{Start: baseTime, End: baseTime.Add(10 * time.Second)},
+					{Start: baseTime.Add(20 * time.Second), End: baseTime.Add(30 * time.Second)},
+					{Start: baseTime.Add(40 * time.Second), End: baseTime.Add(50 * time.Second)},
+				},
+			},
+		},
+		{
+			name: "merge contiguous, gap splits",
+			segments: []segmentMetadata{
+				// seg1: 0s-10s
+				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 10000, SizeBytes: 100},
+				// seg2: 10s-20s (contiguous with seg1)
+				{FileName: "seg2.mp4", StartTimeUnix: baseTime.Add(10 * time.Second).Unix(), DurationMs: 10000, SizeBytes: 150},
+				// seg3: 30s-40s (gap > slopDuration from seg2)
+				{FileName: "seg3.mp4", StartTimeUnix: baseTime.Add(30 * time.Second).Unix(), DurationMs: 10000, SizeBytes: 200},
+			},
+			expectedRanges: VideoRanges{
+				StorageUsedBytes: 450,
+				TotalDurationMs:  30000,
+				VideoCount:       3,
+				Ranges: []VideoRange{
+					{Start: baseTime, End: baseTime.Add(20 * time.Second)},
+					{Start: baseTime.Add(30 * time.Second), End: baseTime.Add(40 * time.Second)},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resultRanges := getVideoRangesFromSegments(tc.segments)
+
+			test.That(t, resultRanges.StorageUsedBytes, test.ShouldEqual, tc.expectedRanges.StorageUsedBytes)
+			test.That(t, resultRanges.TotalDurationMs, test.ShouldEqual, tc.expectedRanges.TotalDurationMs)
+			test.That(t, resultRanges.VideoCount, test.ShouldEqual, tc.expectedRanges.VideoCount)
+
+			test.That(t, len(resultRanges.Ranges), test.ShouldEqual, len(tc.expectedRanges.Ranges))
+
+			for i := range tc.expectedRanges.Ranges {
+				expectedR := tc.expectedRanges.Ranges[i]
+				actualR := resultRanges.Ranges[i]
+
+				test.That(t, actualR.Start, test.ShouldEqual, expectedR.Start)
+				test.That(t, actualR.End, test.ShouldEqual, expectedR.End)
+			}
+		})
+	}
+}
+
 // setupTestIndexerWithStoragePath creates and initializes an indexer with a given storage path
 // and an in-memory SQLite database for testing.
 func setupTestIndexerWithStoragePath(t *testing.T, storagePath string, storageMaxGB int) (*Indexer, func()) {

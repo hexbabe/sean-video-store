@@ -449,41 +449,6 @@ func (ix *Indexer) GetVideoList(ctx context.Context) (VideoRanges, error) {
 	return getVideoRangesFromSegments(segments), nil
 }
 
-// getVideoRangesFromSegments processes a slice of segment metadata to produce videoRanges.
-func getVideoRangesFromSegments(segments []segmentMetadata) VideoRanges {
-	var vr VideoRanges
-	if len(segments) == 0 {
-		return vr
-	}
-
-	var prevRange *VideoRange
-	for _, s := range segments {
-		vr.VideoCount++
-		vr.TotalDurationMs += s.DurationMs
-		vr.StorageUsedBytes += s.SizeBytes
-
-		segmentStart := time.Unix(s.StartTimeUnix, 0)
-		segmentEnd := segmentStart.Add(time.Duration(s.DurationMs) * time.Millisecond)
-
-		if prevRange == nil {
-			prevRange = &VideoRange{Start: segmentStart, End: segmentEnd}
-		} else {
-			if segmentStart.After(prevRange.End.Add(slopDuration)) {
-				// make a new range as there is too big of a gap between the prev segment and the new segment
-				vr.Ranges = append(vr.Ranges, *prevRange)
-				prevRange = &VideoRange{Start: segmentStart, End: segmentEnd}
-			} else {
-				// extend range
-				prevRange.End = segmentEnd
-			}
-		}
-	}
-	if prevRange != nil {
-		vr.Ranges = append(vr.Ranges, *prevRange)
-	}
-	return vr
-}
-
 // getSegmentsAscTime is a helper function that retrieves all non-deleted segment data from the database,
 // ordered by start time.
 func (ix *Indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, error) {
@@ -524,6 +489,41 @@ func (ix *Indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, e
 
 	ix.logger.Debugf("retrieved %d segments from index", len(segments))
 	return segments, nil
+}
+
+// getVideoRangesFromSegments processes a slice of segment metadata to produce videoRanges.
+func getVideoRangesFromSegments(segments []segmentMetadata) VideoRanges {
+	var vr VideoRanges
+	if len(segments) == 0 {
+		return vr
+	}
+
+	var prevRange *VideoRange
+	for _, s := range segments {
+		vr.VideoCount++
+		vr.TotalDurationMs += s.DurationMs
+		vr.StorageUsedBytes += s.SizeBytes
+
+		segmentStart := time.Unix(s.StartTimeUnix, 0)
+		segmentEnd := segmentStart.Add(time.Duration(s.DurationMs) * time.Millisecond)
+
+		if prevRange == nil {
+			prevRange = &VideoRange{Start: segmentStart, End: segmentEnd}
+		} else {
+			if segmentStart.After(prevRange.End.Add(slopDuration)) {
+				// make a new range as there is too big of a gap between the prev segment and the new segment
+				vr.Ranges = append(vr.Ranges, *prevRange)
+				prevRange = &VideoRange{Start: segmentStart, End: segmentEnd}
+			} else {
+				// extend range
+				prevRange.End = segmentEnd
+			}
+		}
+	}
+	if prevRange != nil {
+		vr.Ranges = append(vr.Ranges, *prevRange)
+	}
+	return vr
 }
 
 // Close closes the indexer and the underlying database.
