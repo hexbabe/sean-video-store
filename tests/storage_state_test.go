@@ -13,7 +13,7 @@ import (
 	"go.viam.com/test"
 )
 
-// 7 segments downloaded & stored as artifacts + 1 segment created by the test
+// 7 segments downloaded & stored as artifacts + 1 segment created by the test.
 const numSegments = 8
 
 func TestGetStorageStateDoCommand(t *testing.T) {
