@@ -94,7 +94,7 @@ func (ix *Indexer) initializeDB() error {
 		start_time_unix INTEGER NOT NULL,
 		duration_ms INTEGER NOT NULL,
 		size_bytes INTEGER NOT NULL,
-		inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
 		deleted_at TIMESTAMP
 	);
 	`, segmentsTableName)
