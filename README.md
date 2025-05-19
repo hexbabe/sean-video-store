@@ -283,7 +283,7 @@ The response includes a list of `stored_video` time ranges and `disk_usage` stat
 ```
 
 > [!NOTE]
-> Swapping `storage_path` will not delete any data, it will simply spin up a new DB file in the new path and preserve
+> Swapping `storage_path` will not delete any data, it will simply cause video store to start persisting video data to the new path and preserve
 the old `storage_path` directory with the old videos and the old database, and save new videos in the new path.
 
 ## Local Development
