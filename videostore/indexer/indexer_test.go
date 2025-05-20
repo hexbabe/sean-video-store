@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,21 +17,12 @@ import (
 
 // setupTestIndexer creates and initializes an indexer with an in-memory SQLite database for testing.
 // It returns the indexer instance and a cleanup function.
-func setupTestIndexer(t *testing.T) (*Indexer, func()) {
+func setupTestIndexer(t *testing.T, storagePath string) (*Indexer, func()) {
 	t.Helper()
-	idx := NewIndexer("", 1, logging.NewTestLogger(t))
+	idx := NewIndexer(storagePath, 1, logging.NewTestLogger(t))
 
-	// Explicitly set dbPath to an in-memory database for actual testing to avoid disk I/O.
-	inMemoryDBPath := fmt.Sprintf("file:%s?mode=memory&cache=shared", filepath.Join("", "test_index.sqlite.db"))
-	db, err := sql.Open("sqlite3", inMemoryDBPath)
+	err := idx.Setup(context.Background())
 	test.That(t, err, test.ShouldBeNil)
-
-	idx.db = db
-	idx.dbPath = inMemoryDBPath
-
-	err = idx.initializeDB()
-	test.That(t, err, test.ShouldBeNil)
-	idx.setupDone.Store(true)
 
 	cleanup := func() {
 		err := idx.Close()
@@ -48,7 +38,7 @@ func setupTestIndexer(t *testing.T) (*Indexer, func()) {
 func insertTestSegment(t *testing.T, idx *Indexer, fileName string, startTimeUnix, durationMs, sizeBytes int64) {
 	t.Helper()
 	query := fmt.Sprintf(
-		"INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+		"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
 		segmentsTableName,
 	)
 	_, err := idx.db.Exec(query, fileName, startTimeUnix, durationMs, sizeBytes)
@@ -259,7 +249,7 @@ func TestGetVideoList(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			idx, cleanup := setupTestIndexer(t)
+			idx, cleanup := setupTestIndexer(t, t.TempDir())
 			defer cleanup()
 
 			for _, seg := range tc.segmentsToInsert {
@@ -374,46 +364,17 @@ func TestGetVideoRangesFromSegments(t *testing.T) {
 	}
 }
 
-// setupTestIndexerWithStoragePath creates and initializes an indexer with a given storage path
-// and an in-memory SQLite database for testing.
-func setupTestIndexerWithStoragePath(t *testing.T, storagePath string, storageMaxGB int) (*Indexer, func()) {
-	t.Helper()
-	idx := NewIndexer(storagePath, storageMaxGB, logging.NewTestLogger(t))
-
-	err := os.MkdirAll(storagePath, 0o750)
-	test.That(t, err, test.ShouldBeNil)
-
-	// Use a unique in-memory database name for each test to prevent interference.
-	dbName := fmt.Sprintf("file:%s_db?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
-	db, err := sql.Open("sqlite3", dbName)
-	test.That(t, err, test.ShouldBeNil)
-
-	idx.db = db
-	idx.dbPath = dbName
-
-	err = idx.initializeDB()
-	test.That(t, err, test.ShouldBeNil)
-	idx.setupDone.Store(true)
-
-	cleanup := func() {
-		err := idx.Close()
-		test.That(t, err, test.ShouldBeNil)
-	}
-	return idx, cleanup
-}
-
 // createDummyFile creates a file with the given name and size in the specified directory.
 func createDummyFile(t *testing.T, dirPath, fileName string, sizeBytes int64) error {
 	t.Helper()
 	fullPath := filepath.Join(dirPath, fileName)
 	data := make([]byte, sizeBytes)
-	return os.WriteFile(fullPath, data, 0o600)
+	return os.WriteFile(fullPath, data, 0o644)
 }
 
 func TestDeletionLogic(t *testing.T) {
 	storagePath := t.TempDir()
-	storageMaxGB := 1
-	idx, cleanup := setupTestIndexerWithStoragePath(t, storagePath, storageMaxGB)
+	idx, cleanup := setupTestIndexer(t, storagePath)
 	defer cleanup()
 
 	megabyte := int64(1024 * 1024)
@@ -437,7 +398,7 @@ func TestDeletionLogic(t *testing.T) {
 		test.That(t, err, test.ShouldBeNil)
 
 		query := fmt.Sprintf(
-			"INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+			"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
 			segmentsTableName,
 		)
 		_, err = idx.db.Exec(query, f.name, f.timestamp.Unix(), f.durationMs, f.sizeBytes)

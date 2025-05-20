@@ -37,7 +37,7 @@ func main() {
 	if err != nil {
 		logger.Fatal(err.Error())
 	}
-	vs, err := videostore.NewRTPVideoStore(config, logger)
+	vs, err := videostore.NewRTPVideoStore(ctx, config, logger)
 	if err != nil {
 		logger.Fatal(err.Error())
 	}

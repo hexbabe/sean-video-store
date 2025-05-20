@@ -66,7 +66,7 @@ func NewIndexer(storagePath string, storageMaxGB int, logger logging.Logger) *In
 }
 
 // Setup initializes the underlying database and readies it for use.
-func (ix *Indexer) Setup() error {
+func (ix *Indexer) Setup(ctx context.Context) error {
 	if ix.setupDone.Load() {
 		return nil
 	}
@@ -78,7 +78,7 @@ func (ix *Indexer) Setup() error {
 		return fmt.Errorf("failed to open index db: %w", err)
 	}
 	ix.db = db
-	if err := ix.initializeDB(); err != nil {
+	if err := ix.initializeDB(ctx); err != nil {
 		_ = ix.db.Close()
 		return fmt.Errorf("failed to initialize index db schema: %w", err)
 	}
@@ -86,11 +86,11 @@ func (ix *Indexer) Setup() error {
 	return nil
 }
 
-func (ix *Indexer) initializeDB() error {
+func (ix *Indexer) initializeDB(ctx context.Context) error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		file_name TEXT NOT NULL,
+		file_name TEXT NOT NULL UNIQUE,
 		start_time_unix INTEGER NOT NULL,
 		duration_ms INTEGER NOT NULL,
 		size_bytes INTEGER NOT NULL,
@@ -99,7 +99,7 @@ func (ix *Indexer) initializeDB() error {
 	);
 	`, segmentsTableName)
 
-	_, err := ix.db.Exec(query)
+	_, err := ix.db.ExecContext(ctx, query)
 	return err
 }
 
@@ -174,7 +174,7 @@ func (ix *Indexer) indexNewFiles(ctx context.Context) error {
 			continue
 		}
 
-		if err := ix.indexNewFile(fileName, entry.info.Size()); err != nil {
+		if err := ix.indexNewFile(ctx, fileName, entry.info.Size()); err != nil {
 			ix.logger.Errorw("failed to index new file", "name", fileName, "error", err)
 		}
 	}
@@ -183,7 +183,7 @@ func (ix *Indexer) indexNewFiles(ctx context.Context) error {
 }
 
 // indexNewFile is a helper function that indexes a new video file in the db.
-func (ix *Indexer) indexNewFile(fileName string, fileSize int64) error {
+func (ix *Indexer) indexNewFile(ctx context.Context, fileName string, fileSize int64) error {
 	startTime, err := vsutils.ExtractDateTimeFromFilename(fileName)
 	if err != nil {
 		ix.logger.Warnw("failed to extract timestamp from filename, skipping", "file", fileName, "error", err)
@@ -198,8 +198,18 @@ func (ix *Indexer) indexNewFile(fileName string, fileSize int64) error {
 	}
 	durationMs := info.Duration.Milliseconds()
 
-	query := fmt.Sprintf("INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);", segmentsTableName)
-	_, err = ix.db.Exec(query, fileName, startTime.Unix(), durationMs, fileSize)
+	query := fmt.Sprintf(
+		"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+		segmentsTableName,
+	)
+	_, err = ix.db.ExecContext(
+		ctx,
+		query,
+		fileName,
+		startTime.Unix(),
+		durationMs,
+		fileSize,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to insert segment into index: %w", err)
 	}

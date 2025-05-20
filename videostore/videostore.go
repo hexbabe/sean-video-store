@@ -20,9 +20,6 @@ import (
 	"go.viam.com/utils"
 )
 
-// Allows for mocking in tests.
-var duStatfs = diskusage.Statfs
-
 // Model is the model for the video storage camera component.
 var Model = resource.ModelNamespace("viam").WithFamily("video").WithModel("storage")
 
@@ -152,7 +149,7 @@ type StorageState struct {
 }
 
 // NewFramePollingVideoStore returns a VideoStore that stores video it encoded from polling frames from a camera.Camera.
-func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore, error) {
+func NewFramePollingVideoStore(ctx context.Context, config Config, logger logging.Logger) (VideoStore, error) {
 	if config.Type != SourceTypeFrame {
 		return nil, fmt.Errorf("config type must be %s", SourceTypeFrame)
 	}
@@ -201,7 +198,7 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 	}
 
 	vs.indexer = indexer.NewIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
-	err = vs.indexer.Setup()
+	err = vs.indexer.Setup(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
@@ -223,7 +220,7 @@ func NewFramePollingVideoStore(config Config, logger logging.Logger) (VideoStore
 }
 
 // NewReadOnlyVideoStore returns a VideoStore that can return stored video but doesn't create new video segements.
-func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, error) {
+func NewReadOnlyVideoStore(ctx context.Context, config Config, logger logging.Logger) (VideoStore, error) {
 	if config.Type != SourceTypeReadOnly {
 		return nil, fmt.Errorf("config type must be %s", SourceTypeReadOnly)
 	}
@@ -248,7 +245,7 @@ func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, er
 	}
 
 	indexer := indexer.NewIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
-	err = indexer.Setup()
+	err = indexer.Setup(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer for read-only videostore: %w", err)
 	}
@@ -264,7 +261,7 @@ func NewReadOnlyVideoStore(config Config, logger logging.Logger) (VideoStore, er
 }
 
 // NewRTPVideoStore returns a VideoStore that stores video it receives from the caller.
-func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, error) {
+func NewRTPVideoStore(ctx context.Context, config Config, logger logging.Logger) (RTPVideoStore, error) {
 	if config.Type != SourceTypeRTP {
 		return nil, fmt.Errorf("config type must be %s", SourceTypeRTP)
 	}
@@ -297,7 +294,7 @@ func NewRTPVideoStore(config Config, logger logging.Logger) (RTPVideoStore, erro
 	}
 
 	indexer := indexer.NewIndexer(config.Storage.StoragePath, config.Storage.SizeGB, logger)
-	err = indexer.Setup()
+	err = indexer.Setup(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to set up indexer: %w", err)
 	}
@@ -496,7 +493,7 @@ func (vs *videostore) GetStorageState(ctx context.Context) (*StorageState, error
 		return nil, fmt.Errorf("failed to get storage state from indexer: %w", err)
 	}
 
-	fsUsage, err := duStatfs(vs.config.Storage.StoragePath)
+	fsUsage, err := diskusage.Statfs(vs.config.Storage.StoragePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get filesystem stats for remaining space: %w", err)
 	}
