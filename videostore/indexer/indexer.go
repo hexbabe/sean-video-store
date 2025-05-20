@@ -13,9 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	// Blank importing SQLite3 driver for its side-effects.
-	// This registers the "sqlite3" driver with the database/sql package.
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 	vsutils "github.com/viam-modules/video-store/videostore/utils"
 	"go.viam.com/rdk/logging"
 )
@@ -25,7 +23,7 @@ const (
 	dbFileMode             = 0o750
 	segmentsTableName      = "segments"
 	videoFileSuffix        = ".mp4"
-	indexerRefreshInterval = 10 * time.Second
+	indexerRefreshInterval = 1 * time.Second
 	slopDuration           = 5 * time.Second
 )
 
@@ -120,6 +118,29 @@ func (ix *Indexer) Run(ctx context.Context) {
 	}
 }
 
+// handleRefreshError handles errors that occur during refreshIndexAndStorage.
+// If the error is a db read-only error, it attempts to re-setup the indexer.
+// This can happen if a user manually deletes the index db file while the indexer is running.
+// If the error is not a db read-only error, it logs the error.
+func (ix *Indexer) handleRefreshError(ctx context.Context, err error, phaseName string) {
+	if isDBReadOnlyError(err) {
+		ix.logger.Errorw("db is in readonly mode, trying to re-setup", "error", err)
+		ix.setupDone.Store(false)
+		setupErr := ix.Setup(ctx)
+		if setupErr != nil {
+			panic("failed to re-set up index db after readonly error: " + setupErr.Error())
+		}
+		ix.logger.Info("successfully re-setup db after readonly error.")
+		return
+	}
+	ix.logger.Errorw("error refreshing indexer", "phase", phaseName, "error", err)
+}
+
+func isDBReadOnlyError(err error) bool {
+	var sErr sqlite3.Error
+	return errors.As(err, &sErr) && sErr.Code == sqlite3.ErrReadonly
+}
+
 func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	if !ix.setupDone.Load() {
 		ix.logger.Error("indexer setup not complete")
@@ -131,7 +152,7 @@ func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	// 1. Index new files
 	indexStart := time.Now()
 	if err := ix.indexNewFiles(ctx); err != nil {
-		ix.logger.Errorw("error during indexNewFiles phase", "error", err)
+		ix.handleRefreshError(ctx, err, "indexNewFiles")
 		return
 	}
 	ix.logger.Debugf("TIMING: indexNewFiles took %v", time.Since(indexStart))
@@ -139,7 +160,7 @@ func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	// 2. Mark files to delete based on storage limits
 	cleanupDBStart := time.Now()
 	if err := ix.cleanupDB(ctx); err != nil {
-		ix.logger.Errorw("error in cleanupDB phase (marking for deletion)", "error", err)
+		ix.handleRefreshError(ctx, err, "cleanupDB")
 		return
 	}
 	ix.logger.Debugf("TIMING: cleanupDB took %v", time.Since(cleanupDBStart))
@@ -147,7 +168,8 @@ func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	// 3. Delete marked files from disk and their records from DB
 	cleanupFilesStart := time.Now()
 	if err := ix.cleanupFiles(ctx); err != nil {
-		ix.logger.Errorw("error in cleanupFiles phase (hard deletion)", "error", err)
+		ix.handleRefreshError(ctx, err, "cleanupFiles")
+		return
 	}
 	ix.logger.Debugf("TIMING: cleanupFiles took %v", time.Since(cleanupFilesStart))
 
@@ -156,14 +178,14 @@ func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 
 // indexNewFiles indexes new video files on disk.
 func (ix *Indexer) indexNewFiles(ctx context.Context) error {
+	indexedFiles, err := ix.getIndexedFiles(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get indexed files: %w", err)
+	}
+
 	diskFileEntries, err := ix.getDiskFilesSorted(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get and sort disk files: %w", err)
-	}
-
-	indexedFiles, err := ix.getIndexedFiles(ctx)
-	if err != nil {
-		return err
 	}
 
 	for _, entry := range diskFileEntries {
@@ -176,30 +198,87 @@ func (ix *Indexer) indexNewFiles(ctx context.Context) error {
 			continue
 		}
 
-		if err := ix.indexNewFile(ctx, fileName, entry.info.Size()); err != nil {
+		err := ix.indexNewFile(ctx, fileName, entry.info.Size())
+		if err != nil {
+			if isDBReadOnlyError(err) {
+				return err
+			}
 			ix.logger.Errorw("failed to index new file", "name", fileName, "error", err)
 		}
 	}
 
-	var filesMissingFromDisk []string
-	// Handle indexed files that no longer exist on disk (e.g. user deleted manually) and mark them for deletion.
-	for indexedFileName := range indexedFiles {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		fullPath := filepath.Join(ix.storagePath, indexedFileName)
-		if _, statErr := os.Stat(fullPath); os.IsNotExist(statErr) {
-			filesMissingFromDisk = append(filesMissingFromDisk, indexedFileName)
-		}
-	}
-
-	if len(filesMissingFromDisk) > 0 {
-		if err := ix.markSegmentsAsDeleted(ctx, filesMissingFromDisk); err != nil {
-			return fmt.Errorf("failed to mark missing disk files as deleted in DB: %w", err)
-		}
+	if err := ix.handleMissingDiskFiles(ctx, indexedFiles); err != nil {
+		return fmt.Errorf("failed to handle missing disk files: %w", err)
 	}
 
 	return nil
+}
+
+// getIndexedFiles returns a map of all non-deleted indexed video file names from the db.
+func (ix *Indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
+	if !ix.setupDone.Load() {
+		return nil, errors.New("indexer setup not complete")
+	}
+	query := "SELECT file_name FROM " + segmentsTableName + " WHERE deleted_at IS NULL;"
+	rows, err := ix.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	files := make(map[string]struct{})
+	for rows.Next() {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		var fileName string
+		if err := rows.Scan(&fileName); err != nil {
+			return nil, err
+		}
+		files[fileName] = struct{}{}
+	}
+	return files, rows.Err()
+}
+
+// getDiskFilesSorted returns a slice of diskFileEntry for all valid video files on disk,
+// sorted by their extracted timestamp (newest first).
+// Files with unparseable names are logged and skipped.
+func (ix *Indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, error) {
+	entries, err := os.ReadDir(ix.storagePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read storage directory %s: %w", ix.storagePath, err)
+	}
+
+	sortableFiles := make([]diskFileEntry, 0, len(entries))
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), videoFileSuffix) {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			ix.logger.Warnw("failed to get FileInfo for disk entry, skipping", "entry_name", entry.Name(), "error", err)
+			continue
+		}
+
+		extractedTime, err := vsutils.ExtractDateTimeFromFilename(info.Name())
+		if err != nil {
+			ix.logger.Warnw("failed to extract timestamp from filename, skipping file", "name", info.Name(), "error", err)
+			continue
+		}
+
+		sortableFiles = append(sortableFiles, diskFileEntry{info: info, time: extractedTime})
+	}
+
+	// Sort files by extracted time (newest first)
+	sort.Slice(sortableFiles, func(i, j int) bool {
+		return sortableFiles[i].time.After(sortableFiles[j].time)
+	})
+	return sortableFiles, nil
 }
 
 // indexNewFile is a helper function that indexes a new video file in the db.
@@ -213,7 +292,7 @@ func (ix *Indexer) indexNewFile(ctx context.Context, fileName string, fileSize i
 	fullFilePath := filepath.Join(ix.storagePath, fileName)
 	info, err := vsutils.GetVideoInfo(fullFilePath)
 	if err != nil {
-		ix.logger.Debugf("failed to get video info, unreadable file will not be indexed: %w", err)
+		ix.logger.Debugw("failed to get video info, unreadable file will not be indexed", "file", fileName, "error", err)
 		return nil
 	}
 	durationMs := info.Duration.Milliseconds()
@@ -236,6 +315,30 @@ func (ix *Indexer) indexNewFile(ctx context.Context, fileName string, fileSize i
 
 	startTimeStr := vsutils.FormatUTC(startTime)
 	ix.logger.Debugw("indexed new file", "file", fileName, "start_time", startTimeStr, "duration_ms", durationMs, "size_bytes", fileSize)
+	return nil
+}
+
+// handleMissingDiskFiles checks for files that are indexed in the DB but no longer exist on disk.
+// It marks such files as deleted in the database.
+func (ix *Indexer) handleMissingDiskFiles(ctx context.Context, indexedFiles map[string]struct{}) error {
+	var filesMissingFromDisk []string
+	for indexedFileName := range indexedFiles {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fullPath := filepath.Join(ix.storagePath, indexedFileName)
+		if _, statErr := os.Stat(fullPath); os.IsNotExist(statErr) {
+			ix.logger.Debugw("indexed file not found on disk, marking for deletion", "file", indexedFileName)
+			filesMissingFromDisk = append(filesMissingFromDisk, indexedFileName)
+		}
+	}
+
+	if len(filesMissingFromDisk) > 0 {
+		if err := ix.markSegmentsAsDeleted(ctx, filesMissingFromDisk); err != nil {
+			return fmt.Errorf("failed to mark missing disk files as deleted in DB: %w", err)
+		}
+		ix.logger.Debugf("marked %d files missing from disk as deleted in DB", len(filesMissingFromDisk))
+	}
 	return nil
 }
 
@@ -380,73 +483,6 @@ func (ix *Indexer) cleanupFiles(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// getIndexedFiles returns a map of all non-deleted indexed video file names from the db.
-func (ix *Indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
-	if !ix.setupDone.Load() {
-		return nil, errors.New("indexer setup not complete")
-	}
-	query := "SELECT file_name FROM " + segmentsTableName + " WHERE deleted_at IS NULL;"
-	rows, err := ix.db.QueryContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	files := make(map[string]struct{})
-	for rows.Next() {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		var fileName string
-		if err := rows.Scan(&fileName); err != nil {
-			return nil, err
-		}
-		files[fileName] = struct{}{}
-	}
-	return files, rows.Err()
-}
-
-// getDiskFilesSorted returns a slice of diskFileEntry for all valid video files on disk,
-// sorted by their extracted timestamp (newest first).
-// Files with unparseable names are logged and skipped.
-func (ix *Indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, error) {
-	entries, err := os.ReadDir(ix.storagePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read storage directory %s: %w", ix.storagePath, err)
-	}
-
-	sortableFiles := make([]diskFileEntry, 0, len(entries))
-	for _, entry := range entries {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), videoFileSuffix) {
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			ix.logger.Warnw("failed to get FileInfo for disk entry, skipping", "entry_name", entry.Name(), "error", err)
-			continue
-		}
-
-		extractedTime, err := vsutils.ExtractDateTimeFromFilename(info.Name())
-		if err != nil {
-			ix.logger.Warnw("failed to extract timestamp from filename, skipping file", "name", info.Name(), "error", err)
-			continue
-		}
-
-		sortableFiles = append(sortableFiles, diskFileEntry{info: info, time: extractedTime})
-	}
-
-	// Sort files by extracted time (newest first)
-	sort.Slice(sortableFiles, func(i, j int) bool {
-		return sortableFiles[i].time.After(sortableFiles[j].time)
-	})
-	return sortableFiles, nil
 }
 
 // VideoRange represents a single contiguous block of stored video segments.
