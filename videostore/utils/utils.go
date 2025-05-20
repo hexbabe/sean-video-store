@@ -70,8 +70,8 @@ type ConcatFileEntry struct {
 	Outpoint *float64 // Optional end time trim point
 }
 
-// String returns the FFmpeg concat demuxer compatible string representation
-func (e ConcatFileEntry) String() []string {
+// Lines returns the FFmpeg concat demuxer compatible string representation
+func (e ConcatFileEntry) Lines() []string {
 	var lines []string
 	lines = append(lines, fmt.Sprintf("file '%s'", e.FilePath))
 	if e.Inpoint != nil {

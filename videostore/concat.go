@@ -113,7 +113,7 @@ func writeConcatFileEntries(entries []vsutils.ConcatFileEntry, filePath string) 
 	defer file.Close()
 
 	for _, entry := range entries {
-		lines := entry.String()
+		lines := entry.Lines()
 		for _, line := range lines {
 			_, err := file.WriteString(line + "\n")
 			if err != nil {
