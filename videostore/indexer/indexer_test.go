@@ -15,13 +15,19 @@ import (
 	"go.viam.com/test"
 )
 
+const (
+	defaultTestWidth  = 640
+	defaultTestHeight = 480
+	defaultTestCodec  = "h264"
+)
+
 // setupTestIndexer creates and initializes an indexer with an in-memory SQLite database for testing.
 // It returns the indexer instance and a cleanup function.
 func setupTestIndexer(t *testing.T, storagePath string) (*Indexer, func()) {
 	t.Helper()
 	idx := NewIndexer(storagePath, 1, logging.NewTestLogger(t))
 
-	err := idx.Setup(context.Background())
+	err := idx.setupDB(context.Background())
 	test.That(t, err, test.ShouldBeNil)
 
 	cleanup := func() {
@@ -38,10 +44,10 @@ func setupTestIndexer(t *testing.T, storagePath string) (*Indexer, func()) {
 func insertTestSegment(t *testing.T, idx *Indexer, fileName string, startTimeUnix, durationMs, sizeBytes int64) {
 	t.Helper()
 	query := fmt.Sprintf(
-		"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+		"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes, width, height, codec) VALUES (?, ?, ?, ?, ?, ?, ?);",
 		segmentsTableName,
 	)
-	_, err := idx.db.Exec(query, fileName, startTimeUnix, durationMs, sizeBytes)
+	_, err := idx.db.Exec(query, fileName, startTimeUnix, durationMs, sizeBytes, defaultTestWidth, defaultTestHeight, defaultTestCodec)
 	test.That(t, err, test.ShouldBeNil)
 }
 
@@ -66,7 +72,7 @@ func TestGetVideoList(t *testing.T) {
 		{
 			name: "single segment",
 			segmentsToInsert: []segmentMetadata{
-				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 10000, SizeBytes: 100},
+				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 10000, SizeBytes: 100, Width: defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec},
 			},
 			expectedRanges: VideoRanges{
 				StorageUsedBytes: 100,
@@ -85,12 +91,14 @@ func TestGetVideoList(t *testing.T) {
 					StartTimeUnix: baseTime.Unix(),
 					DurationMs:    10000,
 					SizeBytes:     100,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // Ends at 00:00:10
 				{
 					FileName:      "seg2.mp4",
 					StartTimeUnix: baseTime.Add(10 * time.Second).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     150,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // Starts at 00:00:10
 			},
 			expectedRanges: VideoRanges{
@@ -113,12 +121,14 @@ func TestGetVideoList(t *testing.T) {
 					StartTimeUnix: baseTime.Unix(),
 					DurationMs:    10000,
 					SizeBytes:     100,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // ends at 00:00:10
 				{
 					FileName:      "seg2.mp4",
 					StartTimeUnix: baseTime.Add(12 * time.Second).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     150,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // starts at 00:00:12 (2s gap)
 			},
 			expectedRanges: VideoRanges{
@@ -141,6 +151,7 @@ func TestGetVideoList(t *testing.T) {
 					StartTimeUnix: baseTime.Unix(),
 					DurationMs:    10000,
 					SizeBytes:     100,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // ends at 00:00:10
 				// Next segment starts at 00:00:15 (10s + 5s slop)
 				{
@@ -148,6 +159,7 @@ func TestGetVideoList(t *testing.T) {
 					StartTimeUnix: baseTime.Add(10 * time.Second).Add(slopDuration).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     150,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				},
 			},
 			expectedRanges: VideoRanges{
@@ -167,12 +179,14 @@ func TestGetVideoList(t *testing.T) {
 					StartTimeUnix: baseTime.Unix(),
 					DurationMs:    10000,
 					SizeBytes:     100,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				},
 				{
 					FileName:      "seg2.mp4",
 					StartTimeUnix: baseTime.Add(16 * time.Second).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     150,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				},
 			},
 			expectedRanges: VideoRanges{
@@ -199,30 +213,35 @@ func TestGetVideoList(t *testing.T) {
 					StartTimeUnix: baseTime.Unix(),
 					DurationMs:    10000,
 					SizeBytes:     100,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // R1: 00:00:00 - 00:00:10
 				{
 					FileName:      "seg2.mp4",
 					StartTimeUnix: baseTime.Add(10 * time.Second).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     150,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // R1: 00:00:10 - 00:00:20 (contig)
 				{
 					FileName:      "seg3.mp4",
 					StartTimeUnix: baseTime.Add(30 * time.Second).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     200,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // R2: 00:00:30 - 00:00:40 (sep)
 				{
 					FileName:      "seg4.mp4",
 					StartTimeUnix: baseTime.Add(42 * time.Second).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     250,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // R2: 00:00:42 - 00:00:52 (contig with R2 by 2s gap < 5s slop)
 				{
 					FileName:      "seg5.mp4",
 					StartTimeUnix: baseTime.Add(60 * time.Second).Unix(),
 					DurationMs:    10000,
 					SizeBytes:     300,
+					Width:         defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec,
 				}, // R3: 00:01:00 - 00:01:10 (sep)
 			},
 			expectedRanges: VideoRanges{
@@ -398,10 +417,10 @@ func TestDeletions(t *testing.T) {
 		test.That(t, err, test.ShouldBeNil)
 
 		query := fmt.Sprintf(
-			"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+			"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes, width, height, codec) VALUES (?, ?, ?, ?, ?, ?, ?);",
 			segmentsTableName,
 		)
-		_, err = idx.db.Exec(query, f.name, f.timestamp.Unix(), f.durationMs, f.sizeBytes)
+		_, err = idx.db.Exec(query, f.name, f.timestamp.Unix(), f.durationMs, f.sizeBytes, defaultTestWidth, defaultTestHeight, defaultTestCodec)
 		test.That(t, err, test.ShouldBeNil)
 	}
 
@@ -445,10 +464,10 @@ func TestManuallyDeletedFile(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	query := fmt.Sprintf(
-		"INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+		"INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes, width, height, codec) VALUES (?, ?, ?, ?, ?, ?, ?);",
 		segmentsTableName,
 	)
-	_, err = idx.db.ExecContext(ctx, query, dummyFileName, baseTime.Unix(), 10000, 1024)
+	_, err = idx.db.ExecContext(ctx, query, dummyFileName, baseTime.Unix(), 10000, 1024, defaultTestWidth, defaultTestHeight, defaultTestCodec)
 	test.That(t, err, test.ShouldBeNil)
 
 	// Verify it's in the DB and not marked as deleted

@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/mattn/go-sqlite3"
@@ -19,12 +19,12 @@ import (
 )
 
 const (
-	dbFileName             = "index.sqlite.db"
-	dbFileMode             = 0o750
-	segmentsTableName      = "segments"
-	videoFileSuffix        = ".mp4"
-	indexerRefreshInterval = 1 * time.Second
-	slopDuration           = 5 * time.Second
+	dbFileName        = "index.sqlite.db"
+	dbFileMode        = 0o750
+	segmentsTableName = "segments"
+	videoFileSuffix   = ".mp4"
+	refreshalInterval = 1 * time.Second
+	slopDuration      = 5 * time.Second
 )
 
 // diskFileEntry holds information about a file on disk being considered for indexing,
@@ -41,7 +41,7 @@ type Indexer struct {
 	storageMaxGB int
 	dbPath       string
 	db           *sql.DB
-	setupDone    atomic.Bool
+	dbPtrMutex   sync.RWMutex
 }
 
 // segmentMetadata holds metadata for an indexed segment.
@@ -50,24 +50,32 @@ type segmentMetadata struct {
 	StartTimeUnix int64
 	DurationMs    int64
 	SizeBytes     int64
+	Width         int
+	Height        int
+	Codec         string
 }
 
 // NewIndexer creates a new indexer instance.
 func NewIndexer(storagePath string, storageMaxGB int, logger logging.Logger) *Indexer {
 	dbPath := filepath.Join(storagePath, dbFileName)
-	return &Indexer{
+	idx := &Indexer{
 		logger:       logger,
 		storagePath:  storagePath,
 		storageMaxGB: storageMaxGB,
 		dbPath:       dbPath,
 	}
+	return idx
 }
 
-// Setup initializes the underlying database and readies it for use.
-func (ix *Indexer) Setup(ctx context.Context) error {
-	if ix.setupDone.Load() {
+// setupDB initializes the underlying database and readies it for use.
+func (ix *Indexer) setupDB(ctx context.Context) error {
+	ix.dbPtrMutex.Lock()
+	defer ix.dbPtrMutex.Unlock()
+
+	if ix.db != nil {
 		return nil
 	}
+
 	if err := os.MkdirAll(filepath.Dir(ix.dbPath), dbFileMode); err != nil {
 		return fmt.Errorf("failed to create directory for index db: %w", err)
 	}
@@ -80,10 +88,10 @@ func (ix *Indexer) Setup(ctx context.Context) error {
 		_ = ix.db.Close()
 		return fmt.Errorf("failed to initialize index db schema: %w", err)
 	}
-	ix.setupDone.Store(true)
 	return nil
 }
 
+// initializeDB initializes the database schema. Assumes the dbPtrMutex is write-locked.
 func (ix *Indexer) initializeDB(ctx context.Context) error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
@@ -92,6 +100,9 @@ func (ix *Indexer) initializeDB(ctx context.Context) error {
 		start_time_unix INTEGER NOT NULL,
 		duration_ms INTEGER NOT NULL,
 		size_bytes INTEGER NOT NULL,
+		width INTEGER NOT NULL,
+		height INTEGER NOT NULL,
+		codec TEXT NOT NULL,
 		inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
 		deleted_at TIMESTAMP
 	);
@@ -104,7 +115,7 @@ func (ix *Indexer) initializeDB(ctx context.Context) error {
 // Run starts the indexer event loop.
 func (ix *Indexer) Run(ctx context.Context) {
 	ix.logger.Debug("starting indexer event loop")
-	ticker := time.NewTicker(indexerRefreshInterval)
+	ticker := time.NewTicker(refreshalInterval)
 	defer ticker.Stop()
 
 	for {
@@ -113,27 +124,22 @@ func (ix *Indexer) Run(ctx context.Context) {
 			ix.logger.Debug("indexer event loop has stopped")
 			return
 		case <-ticker.C:
-			ix.refreshIndexAndStorage(ctx)
+			err := ix.setupDB(ctx)
+			if err != nil {
+				ix.logger.Errorw("error setting up indexer", "error", err)
+				continue
+			}
+			err = ix.refreshIndexAndStorage(ctx)
+			if err != nil {
+				if isDBReadOnlyError(err) {
+					ix.logger.Warnw("readonly DB error detected by indexer refresh, attempting re-setup.", "error", err)
+					ix.Close()
+				} else {
+					ix.logger.Errorw("error refreshing indexer", "error", err)
+				}
+			}
 		}
 	}
-}
-
-// handleRefreshError handles errors that occur during refreshIndexAndStorage.
-// If the error is a db read-only error, it attempts to re-setup the indexer.
-// This can happen if a user manually deletes the index db file while the indexer is running.
-// If the error is not a db read-only error, it logs the error.
-func (ix *Indexer) handleRefreshError(ctx context.Context, err error, phaseName string) {
-	if isDBReadOnlyError(err) {
-		ix.logger.Errorw("db is in readonly mode, trying to re-setup", "error", err)
-		ix.setupDone.Store(false)
-		setupErr := ix.Setup(ctx)
-		if setupErr != nil {
-			panic("failed to re-set up index db after readonly error: " + setupErr.Error())
-		}
-		ix.logger.Info("successfully re-setup db after readonly error.")
-		return
-	}
-	ix.logger.Errorw("error refreshing indexer", "phase", phaseName, "error", err)
 }
 
 func isDBReadOnlyError(err error) bool {
@@ -141,10 +147,12 @@ func isDBReadOnlyError(err error) bool {
 	return errors.As(err, &sErr) && sErr.Code == sqlite3.ErrReadonly
 }
 
-func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
-	if !ix.setupDone.Load() {
-		ix.logger.Error("indexer setup not complete")
-		return
+// refreshIndexAndStorage refreshes the index and storage.
+func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) error {
+	ix.dbPtrMutex.RLock()
+	defer ix.dbPtrMutex.RUnlock()
+	if ix.db == nil {
+		return errors.New("indexer not setup")
 	}
 
 	start := time.Now()
@@ -152,31 +160,29 @@ func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	// 1. Index new files
 	indexStart := time.Now()
 	if err := ix.indexNewFiles(ctx); err != nil {
-		ix.handleRefreshError(ctx, err, "indexNewFiles")
-		return
+		return err
 	}
 	ix.logger.Debugf("TIMING: indexNewFiles took %v", time.Since(indexStart))
 
 	// 2. Mark files to delete based on storage limits
 	cleanupDBStart := time.Now()
 	if err := ix.cleanupDB(ctx); err != nil {
-		ix.handleRefreshError(ctx, err, "cleanupDB")
-		return
+		return err
 	}
 	ix.logger.Debugf("TIMING: cleanupDB took %v", time.Since(cleanupDBStart))
 
 	// 3. Delete marked files from disk and their records from DB
 	cleanupFilesStart := time.Now()
 	if err := ix.cleanupFiles(ctx); err != nil {
-		ix.handleRefreshError(ctx, err, "cleanupFiles")
-		return
+		return err
 	}
 	ix.logger.Debugf("TIMING: cleanupFiles took %v", time.Since(cleanupFilesStart))
 
 	ix.logger.Debugf("TIMING: refreshIndexAndStorage completed in %v", time.Since(start))
+	return nil
 }
 
-// indexNewFiles indexes new video files on disk.
+// indexNewFiles indexes new video files on disk. Assumes the dbPtrMutex is read-locked.
 func (ix *Indexer) indexNewFiles(ctx context.Context) error {
 	indexedFiles, err := ix.getIndexedFiles(ctx)
 	if err != nil {
@@ -215,10 +221,8 @@ func (ix *Indexer) indexNewFiles(ctx context.Context) error {
 }
 
 // getIndexedFiles returns a map of all non-deleted indexed video file names from the db.
+// Assumes the dbPtrMutex is read-locked.
 func (ix *Indexer) getIndexedFiles(ctx context.Context) (map[string]struct{}, error) {
-	if !ix.setupDone.Load() {
-		return nil, errors.New("indexer setup not complete")
-	}
 	query := "SELECT file_name FROM " + segmentsTableName + " WHERE deleted_at IS NULL;"
 	rows, err := ix.db.QueryContext(ctx, query)
 	if err != nil {
@@ -281,7 +285,7 @@ func (ix *Indexer) getDiskFilesSorted(ctx context.Context) ([]diskFileEntry, err
 	return sortableFiles, nil
 }
 
-// indexNewFile is a helper function that indexes a new video file in the db.
+// indexNewFile is a helper function that indexes a new video file in the db. Assumes the dbPtrMutex is read-locked.
 func (ix *Indexer) indexNewFile(ctx context.Context, fileName string, fileSize int64) error {
 	startTime, err := vsutils.ExtractDateTimeFromFilename(fileName)
 	if err != nil {
@@ -298,7 +302,7 @@ func (ix *Indexer) indexNewFile(ctx context.Context, fileName string, fileSize i
 	durationMs := info.Duration.Milliseconds()
 
 	query := fmt.Sprintf(
-		"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+		"INSERT OR IGNORE INTO %s (file_name, start_time_unix, duration_ms, size_bytes, width, height, codec) VALUES (?, ?, ?, ?, ?, ?, ?);",
 		segmentsTableName,
 	)
 	_, err = ix.db.ExecContext(
@@ -308,6 +312,9 @@ func (ix *Indexer) indexNewFile(ctx context.Context, fileName string, fileSize i
 		startTime.Unix(),
 		durationMs,
 		fileSize,
+		info.Width,
+		info.Height,
+		info.Codec,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert segment into index: %w", err)
@@ -343,7 +350,7 @@ func (ix *Indexer) handleMissingDiskFiles(ctx context.Context, indexedFiles map[
 }
 
 // cleanupDB determines which segment files should be deleted based on storage limits
-// and marks them in the database by setting deleted_at.
+// and marks them in the database by setting deleted_at. Assumes the dbPtrMutex is read-locked.
 func (ix *Indexer) cleanupDB(ctx context.Context) error {
 	maxStorageSizeBytes := int64(ix.storageMaxGB) * vsutils.Gigabyte
 	currentSizeBytes, err := vsutils.GetDirectorySize(ix.storagePath)
@@ -387,7 +394,7 @@ func (ix *Indexer) cleanupDB(ctx context.Context) error {
 	return nil
 }
 
-// markSegmentsAsDeleted sets the deleted_at timestamp for the given file names.
+// markSegmentsAsDeleted sets the deleted_at timestamp for the given file names. Assumes the dbPtrMutex is read-locked.
 func (ix *Indexer) markSegmentsAsDeleted(ctx context.Context, names []string) error {
 	if len(names) == 0 {
 		return nil
@@ -427,6 +434,7 @@ func (ix *Indexer) markSegmentsAsDeleted(ctx context.Context, names []string) er
 
 // cleanupFiles queries for segments marked with deleted_at,
 // deletes their files from disk, and then removes their records from the database.
+// Assumes the dbPtrMutex is read-locked.
 func (ix *Indexer) cleanupFiles(ctx context.Context) error {
 	ix.logger.Debug("starting cleanupFiles: querying for segments marked as deleted")
 
@@ -501,8 +509,10 @@ type VideoRanges struct {
 
 // GetVideoList returns the full list of video range structs from the db.
 func (ix *Indexer) GetVideoList(ctx context.Context) (VideoRanges, error) {
-	if !ix.setupDone.Load() {
-		return VideoRanges{}, errors.New("indexer setup not complete")
+	ix.dbPtrMutex.RLock()
+	defer ix.dbPtrMutex.RUnlock()
+	if ix.db == nil {
+		return VideoRanges{}, errors.New("indexer not setup")
 	}
 
 	start := time.Now()
@@ -516,13 +526,10 @@ func (ix *Indexer) GetVideoList(ctx context.Context) (VideoRanges, error) {
 }
 
 // getSegmentsAscTime is a helper function that retrieves all non-deleted segment data from the database,
-// ordered by start time.
+// ordered by start time. Assumes the dbPtrMutex is read-locked.
 func (ix *Indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, error) {
-	if !ix.setupDone.Load() {
-		return nil, errors.New("indexer setup not complete")
-	}
 	query := fmt.Sprintf(`
-	SELECT file_name, start_time_unix, duration_ms, size_bytes
+	SELECT file_name, start_time_unix, duration_ms, size_bytes, width, height, codec
 	FROM %s
 	WHERE deleted_at IS NULL
 	ORDER BY start_time_unix ASC;
@@ -542,7 +549,7 @@ func (ix *Indexer) getSegmentsAscTime(ctx context.Context) ([]segmentMetadata, e
 		}
 		var sm segmentMetadata
 
-		if err := rows.Scan(&sm.FileName, &sm.StartTimeUnix, &sm.DurationMs, &sm.SizeBytes); err != nil {
+		if err := rows.Scan(&sm.FileName, &sm.StartTimeUnix, &sm.DurationMs, &sm.SizeBytes, &sm.Width, &sm.Height, &sm.Codec); err != nil {
 			return nil, fmt.Errorf("failed to scan segment row during full query: %w", err)
 		}
 
@@ -594,12 +601,14 @@ func getVideoRangesFromSegments(segments []segmentMetadata) VideoRanges {
 
 // Close closes the indexer and the underlying database.
 func (ix *Indexer) Close() error {
-	if ix.setupDone.Load() {
+	ix.dbPtrMutex.Lock()
+	defer ix.dbPtrMutex.Unlock()
+	if ix.db != nil {
 		err := ix.db.Close()
 		if err != nil {
 			return fmt.Errorf("error closing index db: %w", err)
 		}
-		ix.setupDone.Store(false)
+		ix.db = nil
 		ix.logger.Debug("indexer closed")
 	}
 	return nil

@@ -140,7 +140,7 @@ tool-install:
 		github.com/golangci/golangci-lint/cmd/golangci-lint \
 		github.com/rhysd/actionlint/cmd/actionlint
 
-lint: tool-install $(FFMPEG_BUILD)
+lint: tool-install $(FFMPEG_BUILD) update-rdk
 	go mod tidy
 	CGO_CFLAGS=$(CGO_CFLAGS) GOFLAGS=$(GOFLAGS) $(TOOL_BIN)/golangci-lint run -v --fix --config=./etc/.golangci.yaml --timeout=2m
 
@@ -160,6 +160,10 @@ endif
 	cp $(BIN_OUTPUT_PATH)/video-store bin/video-store
 	CGO_LDFLAGS="$(CGO_LDFLAGS)" CGO_CFLAGS=$(CGO_CFLAGS) go test -v ./...
 	rm bin/video-store
+
+update-rdk:
+	go get go.viam.com/rdk@latest
+	go mod tidy
 
 module: $(BIN_OUTPUT_PATH)/video-store
 	cp $(BIN_OUTPUT_PATH)/video-store bin/video-store
