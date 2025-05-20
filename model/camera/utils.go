@@ -109,8 +109,8 @@ func GetStorageStateDoCommandResponse(state *videostore.StorageState) map[string
 
 	videoList := make([]map[string]interface{}, 0, len(state.VideoRanges.Ranges))
 	for _, timeRange := range state.VideoRanges.Ranges {
-		fromStr := vsutils.FormatDateTimeString(timeRange.Start)
-		toStr := vsutils.FormatDateTimeString(timeRange.End)
+		fromStr := vsutils.FormatUTC(timeRange.Start)
+		toStr := vsutils.FormatUTC(timeRange.End)
 		videoList = append(videoList, map[string]interface{}{
 			"from": fromStr,
 			"to":   toStr,

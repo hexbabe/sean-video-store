@@ -372,7 +372,7 @@ func createDummyFile(t *testing.T, dirPath, fileName string, sizeBytes int64) er
 	return os.WriteFile(fullPath, data, 0o644)
 }
 
-func TestDeletionLogic(t *testing.T) {
+func TestDeletions(t *testing.T) {
 	storagePath := t.TempDir()
 	idx, cleanup := setupTestIndexer(t, storagePath)
 	defer cleanup()
@@ -428,4 +428,45 @@ func TestDeletionLogic(t *testing.T) {
 			test.That(t, deletedAt.Valid, test.ShouldBeFalse)
 		}
 	}
+}
+
+func TestManuallyDeletedFile(t *testing.T) {
+	storagePath := t.TempDir()
+	idx, cleanup := setupTestIndexer(t, storagePath)
+	defer cleanup()
+
+	ctx := context.Background()
+	dummyFileName := "manually_deleted_segment.mp4"
+	dummyFilePath := filepath.Join(storagePath, dummyFileName)
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	// Create a file and index it
+	err := createDummyFile(t, storagePath, dummyFileName, 1024)
+	test.That(t, err, test.ShouldBeNil)
+
+	query := fmt.Sprintf(
+		"INSERT INTO %s (file_name, start_time_unix, duration_ms, size_bytes) VALUES (?, ?, ?, ?);",
+		segmentsTableName,
+	)
+	_, err = idx.db.ExecContext(ctx, query, dummyFileName, baseTime.Unix(), 10000, 1024)
+	test.That(t, err, test.ShouldBeNil)
+
+	// Verify it's in the DB and not marked as deleted
+	var deletedAt sql.NullTime
+	err = idx.db.QueryRowContext(ctx, "SELECT deleted_at FROM segments WHERE file_name = ?", dummyFileName).Scan(&deletedAt)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deletedAt.Valid, test.ShouldBeFalse)
+
+	// Delete the file from disk
+	err = os.Remove(dummyFilePath)
+	test.That(t, err, test.ShouldBeNil)
+
+	// Run the indexer's refresh logic
+	idx.refreshIndexAndStorage(ctx)
+
+	// Assert that the segments table is now empty (record was deleted)
+	var count int
+	err = idx.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM segments").Scan(&count)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, count, test.ShouldEqual, 0)
 }

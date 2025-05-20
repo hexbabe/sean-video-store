@@ -2,7 +2,6 @@
 package vsutils
 
 /*
-#cgo CFLAGS: -I${SRCDIR}
 #include "utils.h"
 #include <libavutil/error.h>
 #include <libavutil/opt.h>
@@ -252,8 +251,8 @@ func ParseDateTimeString(datetime string) (time.Time, error) {
 	return time.ParseInLocation(TimeFormat, datetime, time.Local)
 }
 
-// FormatDateTimeString formats a datetime to a string in UTC with a Z suffix.
-func FormatDateTimeString(datetime time.Time) string {
+// FormatUTC formats a datetime to a string in our format (2006-01-02_15-04-05) in UTC with a Z suffix.
+func FormatUTC(datetime time.Time) string {
 	return datetime.UTC().Format(TimeFormat) + "Z"
 }
 

@@ -89,7 +89,7 @@ func (ix *Indexer) Setup(ctx context.Context) error {
 func (ix *Indexer) initializeDB(ctx context.Context) error {
 	query := fmt.Sprintf(`
 	CREATE TABLE IF NOT EXISTS %s (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id INTEGER NOT NULL PRIMARY KEY,
 		file_name TEXT NOT NULL UNIQUE,
 		start_time_unix INTEGER NOT NULL,
 		duration_ms INTEGER NOT NULL,
@@ -132,6 +132,7 @@ func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	indexStart := time.Now()
 	if err := ix.indexNewFiles(ctx); err != nil {
 		ix.logger.Errorw("error during indexNewFiles phase", "error", err)
+		return
 	}
 	ix.logger.Debugf("TIMING: indexNewFiles took %v", time.Since(indexStart))
 
@@ -139,6 +140,7 @@ func (ix *Indexer) refreshIndexAndStorage(ctx context.Context) {
 	cleanupDBStart := time.Now()
 	if err := ix.cleanupDB(ctx); err != nil {
 		ix.logger.Errorw("error in cleanupDB phase (marking for deletion)", "error", err)
+		return
 	}
 	ix.logger.Debugf("TIMING: cleanupDB took %v", time.Since(cleanupDBStart))
 
@@ -179,6 +181,24 @@ func (ix *Indexer) indexNewFiles(ctx context.Context) error {
 		}
 	}
 
+	var filesMissingFromDisk []string
+	// Handle indexed files that no longer exist on disk (e.g. user deleted manually) and mark them for deletion.
+	for indexedFileName := range indexedFiles {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fullPath := filepath.Join(ix.storagePath, indexedFileName)
+		if _, statErr := os.Stat(fullPath); os.IsNotExist(statErr) {
+			filesMissingFromDisk = append(filesMissingFromDisk, indexedFileName)
+		}
+	}
+
+	if len(filesMissingFromDisk) > 0 {
+		if err := ix.markSegmentsAsDeleted(ctx, filesMissingFromDisk); err != nil {
+			return fmt.Errorf("failed to mark missing disk files as deleted in DB: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -214,7 +234,7 @@ func (ix *Indexer) indexNewFile(ctx context.Context, fileName string, fileSize i
 		return fmt.Errorf("failed to insert segment into index: %w", err)
 	}
 
-	startTimeStr := vsutils.FormatDateTimeString(startTime)
+	startTimeStr := vsutils.FormatUTC(startTime)
 	ix.logger.Debugw("indexed new file", "file", fileName, "start_time", startTimeStr, "duration_ms", durationMs, "size_bytes", fileSize)
 	return nil
 }

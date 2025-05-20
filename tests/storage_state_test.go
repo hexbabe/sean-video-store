@@ -100,7 +100,7 @@ func TestGetStorageStateDoCommand(t *testing.T) {
 	for !indexed {
 		select {
 		case <-timeout:
-			t.Fatal("timed out waiting for indexer to index at least one segment")
+			t.Fatal("timed out waiting for indexer to index all segments")
 		case <-tick:
 			cmd := map[string]interface{}{"command": "get-storage-state"}
 			res, err := vs.DoCommand(timeoutCtx, cmd)
