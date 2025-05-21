@@ -72,7 +72,15 @@ func TestGetVideoList(t *testing.T) {
 		{
 			name: "single segment",
 			segmentsToInsert: []segmentMetadata{
-				{FileName: "seg1.mp4", StartTimeUnix: baseTime.Unix(), DurationMs: 10000, SizeBytes: 100, Width: defaultTestWidth, Height: defaultTestHeight, Codec: defaultTestCodec},
+				{
+					FileName:      "seg1.mp4",
+					StartTimeUnix: baseTime.Unix(),
+					DurationMs:    10000,
+					SizeBytes:     100,
+					Width:         defaultTestWidth,
+					Height:        defaultTestHeight,
+					Codec:         defaultTestCodec,
+				},
 			},
 			expectedRanges: VideoRanges{
 				StorageUsedBytes: 100,

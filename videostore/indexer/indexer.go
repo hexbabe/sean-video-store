@@ -133,7 +133,10 @@ func (ix *Indexer) Run(ctx context.Context) {
 			if err != nil {
 				if isDBReadOnlyError(err) {
 					ix.logger.Warnw("readonly DB error detected by indexer refresh, attempting re-setup.", "error", err)
-					ix.Close()
+					err = ix.Close()
+					if err != nil {
+						ix.logger.Errorw("error closing readonly db", "error", err)
+					}
 				} else {
 					ix.logger.Errorw("error refreshing indexer", "error", err)
 				}

@@ -149,7 +149,7 @@ type StorageState struct {
 }
 
 // NewFramePollingVideoStore returns a VideoStore that stores video it encoded from polling frames from a camera.Camera.
-func NewFramePollingVideoStore(ctx context.Context, config Config, logger logging.Logger) (VideoStore, error) {
+func NewFramePollingVideoStore(_ context.Context, config Config, logger logging.Logger) (VideoStore, error) {
 	if config.Type != SourceTypeFrame {
 		return nil, fmt.Errorf("config type must be %s", SourceTypeFrame)
 	}
@@ -218,7 +218,7 @@ func NewFramePollingVideoStore(ctx context.Context, config Config, logger loggin
 }
 
 // NewReadOnlyVideoStore returns a VideoStore that can return stored video but doesn't create new video segements.
-func NewReadOnlyVideoStore(ctx context.Context, config Config, logger logging.Logger) (VideoStore, error) {
+func NewReadOnlyVideoStore(_ context.Context, config Config, logger logging.Logger) (VideoStore, error) {
 	if config.Type != SourceTypeReadOnly {
 		return nil, fmt.Errorf("config type must be %s", SourceTypeReadOnly)
 	}
@@ -255,7 +255,7 @@ func NewReadOnlyVideoStore(ctx context.Context, config Config, logger logging.Lo
 }
 
 // NewRTPVideoStore returns a VideoStore that stores video it receives from the caller.
-func NewRTPVideoStore(ctx context.Context, config Config, logger logging.Logger) (RTPVideoStore, error) {
+func NewRTPVideoStore(_ context.Context, config Config, logger logging.Logger) (RTPVideoStore, error) {
 	if config.Type != SourceTypeRTP {
 		return nil, fmt.Errorf("config type must be %s", SourceTypeRTP)
 	}
